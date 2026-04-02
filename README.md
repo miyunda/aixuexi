@@ -3,6 +3,7 @@
 本项目是一个本地 CLI 工具，用 Chrome 浏览器辅助完成学习强国 PC 端的日常任务。
 
 当前已实现：
+
 - 登录状态检查与扫码登录提示
 - 每日答题支持人工模式与半自动辅助模式
 - 视频任务自动完成
@@ -45,6 +46,7 @@ browserProfile:
   profileDirectory: Default
 
 logRetentionDays: 365
+
 quiz:
   mode: manual
   videoPreviewSeconds: 20
