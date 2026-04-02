@@ -97,6 +97,19 @@ D. 主导权和主动权
     ]);
   });
 
+  test("matches all suggested multi-choice options", () => {
+    expect(
+      matchSuggestedOptions(
+        ["A. 紧邻草丛随地烧纸", "B. 在火堆余烬彻底熄灭前离开", "C. 冒风紧邻机动车烧纸"],
+        ["A. 紧邻草丛随地烧纸", "B. 在火堆余烬彻底熄灭前离开", "C. 冒风紧邻机动车烧纸"]
+      )
+    ).toEqual([
+      "A. 紧邻草丛随地烧纸",
+      "B. 在火堆余烬彻底熄灭前离开",
+      "C. 冒风紧邻机动车烧纸",
+    ]);
+  });
+
   test("tokenizes blank answer by candidate chips", () => {
     const candidates = ["党中央决策部署", "落实", "贯彻"];
     expect(tokenizeBlankAnswerByCandidates("贯彻落实党中央决策部署", candidates)).toEqual([

@@ -68,7 +68,7 @@ export class BrowserEngine {
         launchArgs.push(`--profile-directory=${config.browserProfile.profileDirectory}`);
       }
     }
-    
+
     this.browser = await puppeteer.launch({
       executablePath: execPath,
       headless: false,
@@ -77,10 +77,10 @@ export class BrowserEngine {
       defaultViewport: null,
       args: launchArgs
     }) as unknown as Browser;
-    
+
     const pages = await this.browser.pages();
     this.page = pages[0] || await this.browser.newPage();
-    
+
     // 强制设置一次 Viewport 以确保渲染分辨率符合预期
     await this.page.setViewport({
       width: config.viewport.width,
