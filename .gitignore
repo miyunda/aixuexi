@@ -18,3 +18,6 @@ tmp/
 
 # Local test scratch files
 test_config*.yaml
+
+# Configuration file
+config.yaml
