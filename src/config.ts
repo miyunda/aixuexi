@@ -10,6 +10,7 @@ export interface IBrowserProfileConfig {
 export interface IQuizConfig {
   mode?: "manual" | "semi-auto";
   videoPreviewSeconds?: number;
+  llmEnabled?: boolean;
   only?: boolean;
   forceRunWhenFull?: boolean;
   testRounds?: number;
@@ -37,6 +38,7 @@ logRetentionDays: 365
 quiz:
   mode: manual
   videoPreviewSeconds: 20
+  llmEnabled: true
   only: false
   forceRunWhenFull: false
   testRounds: 3
@@ -60,6 +62,7 @@ function applyDefaults(config: Partial<IConfig> | null | undefined): IConfig {
     quiz: {
       mode: quizConfig?.mode ?? "manual",
       videoPreviewSeconds: quizConfig?.videoPreviewSeconds ?? 20,
+      llmEnabled: quizConfig?.llmEnabled ?? true,
       only: quizConfig?.only ?? false,
       forceRunWhenFull: quizConfig?.forceRunWhenFull ?? false,
       testRounds: quizConfig?.testRounds ?? 3,

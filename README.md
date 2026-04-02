@@ -1,3 +1,7 @@
+![Bun Version](https://img.shields.io/badge/Bun-%3E%3D1.3.11-black?logo=bun)
+![License](https://img.shields.io/badge/License-WTFPL-brightgreen)
+![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux-blue)
+
 # 爱学习
 
 本项目是一个本地 CLI 工具，用 Chrome 浏览器辅助完成学习强国 PC 端的日常任务。
@@ -12,15 +16,34 @@
 
 ## 环境要求
 
-- [Bun](https://bun.sh)
-- Google Chrome
-- macOS / Linux / Windows 之一
+- [x]  [Bun](https://bun.sh)
+- [x] Google Chrome
+- [x] macOS / Linux / Windows 之一
+- [ ] OpenAI Chat接口兼容的 LLM 服务（可选，用于增强答题准确率）
 
 ## 安装
 
 ```bash
 bun install
 ```
+
+## 环境变量
+
+如果你准备启用 LLM 辅助，推荐把凭据放在项目根目录的 `.env` 文件里。
+
+LLM应该兼容OpenAI Chat接口，必须提供以下三个环境变量：
+
+```dotenv
+AIXUEXI_LLM_API_KEY=your_api_key
+AIXUEXI_LLM_BASE_URL=https://api.example.com/v1
+AIXUEXI_LLM_MODEL=your_model_name
+```
+
+说明：
+
+- 只有当 `quiz.llmEnabled: true` 且以上三个环境变量都已提供时，程序才会实际调用 LLM。
+- 如果缺少任意一个环境变量，程序会自动把 LLM 视为关闭，回退到规则判断和人工兜底。
+- 如果你更偏好全局环境变量，也可以继续使用 shell 配置文件，例如 `~/.zshrc`；但对大多数用户来说，项目内 `.env` 更清晰、更安全。
 
 ## 运行
 
@@ -50,6 +73,7 @@ logRetentionDays: 365
 quiz:
   mode: manual
   videoPreviewSeconds: 20
+  llmEnabled: true
 ```
 
 配置项说明：
@@ -72,6 +96,8 @@ quiz:
   可选 `manual` 或 `semi-auto`。默认 `manual`。
 - `quiz.videoPreviewSeconds`
   半自动答题检测到题中视频时，自动预播的秒数。
+- `quiz.llmEnabled`
+  是否允许在规则无法稳定判断时调用 LLM。默认 `true`。如果未配置 `AIXUEXI_LLM_API_KEY`、`AIXUEXI_LLM_BASE_URL`、`AIXUEXI_LLM_MODEL` 三个环境变量，则即使设为 `true` 也会自动视为关闭。
 
 ## Chrome Profile 策略
 
