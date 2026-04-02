@@ -1,0 +1,17 @@
+viewport:
+  width: 1920
+  height: 1080
+
+browserProfile:
+  strategy: local
+  userDataDir: ./chrome_data_test_exam
+  profileDirectory: Default
+
+logRetentionDays: 365
+quiz:
+  mode: semi-auto
+  videoPreviewSeconds: 20
+  only: false
+  forceRunWhenFull: true
+  testRounds: 5
+  stopAtFirstBlankForDebug: false

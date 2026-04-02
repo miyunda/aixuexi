@@ -1,0 +1,20 @@
+node_modules/
+
+# Runtime browser data
+chrome_data/
+chrome_data_test_exam/
+
+# Runtime state
+data/
+logs/
+tmp/
+
+# Bun / TypeScript
+*.tsbuildinfo
+
+# Local overrides
+.DS_Store
+**/.DS_Store
+
+# Local test scratch files
+test_config*.yaml
