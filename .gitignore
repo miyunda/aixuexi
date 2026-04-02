@@ -19,5 +19,10 @@ tmp/
 # Local test scratch files
 test_config*.yaml
 
+# Local environment secrets
+.env
+.env.local
+.env.*.local
+
 # Configuration file
 config.yaml

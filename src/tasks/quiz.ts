@@ -191,6 +191,7 @@ async function runSemiAutoQuiz(page: Page, score: number, max: number, quizConfi
     }
 
     const shouldUseLlm =
+      (quizConfig?.llmEnabled ?? true) &&
       isLlmConfigured() &&
       (
         (snapshot.questionType === "single" && (suggestions.length !== 1 || isTrueFalseQuestion(snapshot.options))) ||
