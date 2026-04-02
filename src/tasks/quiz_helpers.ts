@@ -18,6 +18,70 @@ interface ParsedQuestionText {
   questionType: QuizQuestionType;
 }
 
+function randomBetween(min: number, max: number): number {
+  return min + Math.random() * (max - min);
+}
+
+function randomInt(min: number, max: number): number {
+  return Math.round(randomBetween(min, max));
+}
+
+async function humanPause(delay: (min: number, max: number) => Promise<void>, min: number, max: number): Promise<void> {
+  await delay(min, max);
+}
+
+async function moveMouseHumanly(page: Page, x: number, y: number): Promise<void> {
+  await page.mouse.move(
+    x + randomBetween(-3, 3),
+    y + randomBetween(-3, 3),
+    { steps: randomInt(10, 22) }
+  );
+  await page.mouse.move(
+    x + randomBetween(-1.5, 1.5),
+    y + randomBetween(-1.5, 1.5),
+    { steps: randomInt(4, 10) }
+  );
+}
+
+async function humanClickPoint(page: Page, x: number, y: number, delay: (min: number, max: number) => Promise<void>): Promise<void> {
+  await moveMouseHumanly(page, x, y);
+  await humanPause(delay, 70, 160);
+  await page.mouse.down();
+  await humanPause(delay, 45, 110);
+  await page.mouse.up();
+}
+
+async function humanClickElement(
+  page: Page,
+  element: { boundingBox: () => Promise<{ x: number; y: number; width: number; height: number; } | null>; evaluate: <T>(pageFunction: (element: Element) => T | Promise<T>) => Promise<T>; },
+  delay: (min: number, max: number) => Promise<void>
+): Promise<boolean> {
+  await element.evaluate((node) => {
+    (node as HTMLElement).scrollIntoView({ behavior: "smooth", block: "center", inline: "center" });
+  }).catch(() => null);
+  await humanPause(delay, 300, 650);
+  const box = await element.boundingBox().catch(() => null);
+  if (!box) return false;
+
+  const insetX = Math.max(4, Math.min(box.width * 0.25, 16));
+  const insetY = Math.max(4, Math.min(box.height * 0.25, 12));
+  const x = randomBetween(box.x + insetX, box.x + box.width - insetX);
+  const y = randomBetween(box.y + insetY, box.y + box.height - insetY);
+  await humanClickPoint(page, x, y, delay);
+  return true;
+}
+
+async function humanTypeText(page: Page, text: string, delay: (min: number, max: number) => Promise<void>): Promise<void> {
+  for (const char of text) {
+    await page.keyboard.type(char, { delay: randomInt(55, 135) });
+    if (/[,，。；：]/.test(char)) {
+      await humanPause(delay, 120, 260);
+    } else if (Math.random() < 0.18) {
+      await humanPause(delay, 60, 180);
+    }
+  }
+}
+
 export function normalizeQuizText(text: string): string {
   return text.replace(/\s+/g, " ").trim();
 }
@@ -262,7 +326,7 @@ export async function navigateToDailyQuiz(page: Page, delay: (min: number, max: 
       node.scrollIntoView({ behavior: "smooth", block: "center" });
     }, target);
     await delay(800, 1200);
-    await target.click();
+    await humanClickElement(page, target, delay);
 
     await Promise.race([
       page.waitForNavigation({ waitUntil: "networkidle2", timeout: 15000 }).catch(() => null),
@@ -360,6 +424,8 @@ export async function navigateToDailyQuiz(page: Page, delay: (min: number, max: 
     await delay(2000, 3000);
     return;
   }
+
+  await humanPause(delay, 400, 900);
 
   await Promise.race([
     page.waitForNavigation({ waitUntil: "networkidle2", timeout: 15000 }).catch(() => null),
@@ -459,14 +525,8 @@ export async function openHintAndExtract(page: Page, delay: (min: number, max: n
     await delay(200, 400);
 
     try {
-      const box = await node.boundingBox();
-      if (box) {
-        await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-        await delay(100, 180);
-        await page.mouse.down();
-        await delay(60, 120);
-        await page.mouse.up();
-      } else {
+      const clicked = await humanClickElement(page, node, delay);
+      if (!clicked) {
         await node.click();
       }
     } catch {
@@ -570,6 +630,43 @@ export async function extractHintHighlights(page: Page): Promise<string[]> {
   return picked;
 }
 
+async function readOptionSelectionState(page: Page, expectedText: string): Promise<boolean> {
+  return await page.evaluate((targetText) => {
+    const normalize = (value: string | null | undefined) => (value || "").replace(/\s+/g, " ").trim();
+    const nodes = Array.from(document.querySelectorAll<HTMLElement>(".q-answer.choosable, .q-answer"));
+    const node = nodes.find((item) => normalize(item.textContent) === targetText);
+    if (!node) return false;
+
+    const style = getComputedStyle(node);
+    const classText = (node.className || "").toLowerCase();
+    const ariaChecked = node.getAttribute("aria-checked");
+    const ariaSelected = node.getAttribute("aria-selected");
+    const borderColor = style.borderColor || "";
+    const textColor = style.color || "";
+    const backgroundColor = style.backgroundColor || "";
+    const boxShadow = style.boxShadow || "";
+
+    const highlightedBorder =
+      /rgb\(210,\s*65,\s*50\)|rgb\(217,\s*83,\s*79\)|rgb\(255,\s*77,\s*79\)|rgb\(230,\s*95,\s*64\)/i.test(borderColor);
+    const highlightedText =
+      /rgb\(210,\s*65,\s*50\)|rgb\(217,\s*83,\s*79\)|rgb\(255,\s*77,\s*79\)|rgb\(230,\s*95,\s*64\)/i.test(textColor);
+    const highlightedBackground =
+      /rgb\(255,\s*245,\s*245\)|rgb\(255,\s*240,\s*240\)|rgb\(255,\s*237,\s*237\)|rgb\(255,\s*250,\s*250\)/i.test(backgroundColor);
+    const highlightedShadow =
+      /rgb\(210,\s*65,\s*50\)|rgb\(217,\s*83,\s*79\)|rgb\(255,\s*77,\s*79\)|rgb\(230,\s*95,\s*64\)/i.test(boxShadow);
+
+    return (
+      ariaChecked === "true" ||
+      ariaSelected === "true" ||
+      /(checked|selected|active|current)/.test(classText) ||
+      highlightedBorder ||
+      highlightedText ||
+      highlightedBackground ||
+      highlightedShadow
+    );
+  }, expectedText);
+}
+
 export async function applySuggestedAnswers(
   page: Page,
   snapshot: QuizQuestionSnapshot,
@@ -580,37 +677,32 @@ export async function applySuggestedAnswers(
     return [];
   }
 
-  const applied = await page.evaluate((rawSuggestions) => {
-    const normalize = (value: string | null | undefined) => (value || "").replace(/\s+/g, " ").trim();
-    const stripPrefix = (value: string) => normalize(value).replace(/^[A-D][.．、]?\s*/, "");
-    const getLabel = (value: string) => {
-      const match = normalize(value).match(/^([A-D])[.．、]?$/i) || normalize(value).match(/^([A-D])[.．、]\s*/i);
-      return (match?.[1] || "").toUpperCase();
-    };
-    const normalizedSuggestions = rawSuggestions.map((item) => normalize(item));
-    const strippedSuggestions = normalizedSuggestions.map((item) => stripPrefix(item));
-    const labelSuggestions = normalizedSuggestions.map((item) => getLabel(item)).filter(Boolean);
-    const optionNodes = Array.from(document.querySelectorAll<HTMLElement>(".q-answer.choosable, .q-answer"));
-    const appliedTexts: string[] = [];
+  const matchedTexts = matchSuggestedOptions(snapshot.options, suggestions);
+  const optionNodes = await page.$$(".q-answer.choosable, .q-answer");
+  const applied: string[] = [];
 
-    for (const node of optionNodes) {
-      const text = normalize(node.textContent);
-      if (!text) continue;
-      const stripped = stripPrefix(text);
-      const label = getLabel(text);
-      const matched =
-        normalizedSuggestions.includes(text) ||
-        strippedSuggestions.includes(stripped) ||
-        (label && labelSuggestions.includes(label));
-      if (!matched) continue;
-
-      node.scrollIntoView({ behavior: "smooth", block: "center" });
-      node.click();
-      appliedTexts.push(text);
+  for (const node of optionNodes) {
+    const text = await page.evaluate((el) => (el.textContent || "").replace(/\s+/g, " ").trim(), node);
+    if (!matchedTexts.includes(text)) continue;
+    const alreadySelected = await readOptionSelectionState(page, text).catch(() => false);
+    if (alreadySelected) {
+      applied.push(text);
+      continue;
     }
 
-    return appliedTexts;
-  }, suggestions);
+    let selected = false;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const clicked = await humanClickElement(page, node, delay).catch(() => false);
+      if (!clicked) continue;
+      await humanPause(delay, 220 + attempt * 80, 520 + attempt * 120);
+      selected = await readOptionSelectionState(page, text).catch(() => false);
+      if (selected) break;
+    }
+
+    if (selected) {
+      applied.push(text);
+    }
+  }
 
   if (applied.length > 0) {
     await delay(600, 1000);
@@ -629,7 +721,7 @@ export async function applyBlankAnswers(
   }
 
   // Try to dismiss floating hint popovers before interacting with blank slots/chips.
-  await page.mouse.click(48, 48).catch(() => null);
+  await humanClickPoint(page, randomBetween(28, 72), randomBetween(28, 72), delay).catch(() => null);
   await delay(80, 140);
 
   // Strategy 1: word-bank blank questions (click tokens to fill)
@@ -706,7 +798,51 @@ export async function applyBlankAnswers(
       const tokenSeq = tokenizeBlankAnswerByCandidates(suggestion, candidateTokens);
       if (tokenSeq.length === 0) continue;
       for (const token of tokenSeq) {
-        const clicked = await page.evaluate((expected) => {
+        const slot = await page.evaluate(() => {
+          const normalize = (value: string | null | undefined) => (value || "").replace(/\s+/g, " ").trim();
+          const isVisible = (item: HTMLElement) => {
+            const rect = item.getBoundingClientRect();
+            if (rect.width < 6 || rect.height < 6) return false;
+            const style = getComputedStyle(item);
+            return style.display !== "none" && style.visibility !== "hidden";
+          };
+          const root = (document.querySelector(".q-body, .question, .q-question, .detail-body") as HTMLElement | null) || document.body;
+          const slotNodes = Array.from(root.querySelectorAll<HTMLElement>("input, textarea, [contenteditable='true'], span, div, i, b, em"))
+            .filter((item) => {
+              if (!isVisible(item)) return false;
+              const cls = (item.className || "").toLowerCase();
+              const text = normalize(item.textContent);
+              const rect = item.getBoundingClientRect();
+              const style = getComputedStyle(item);
+              const inHintPopover = Boolean(item.closest(".ant-popover, [class*='popover'], [class*='tooltip'], .q-help"));
+              if (inHintPopover) return false;
+              const hasSlotClass = /(blank|input|slot|answer|fill)/.test(cls);
+              const boxLike =
+                rect.width >= 16 &&
+                rect.width <= 52 &&
+                rect.height >= 16 &&
+                rect.height <= 56 &&
+                (style.borderStyle !== "none" || style.backgroundColor !== "rgba(0, 0, 0, 0)");
+              const emptyLike = !text || /^[_\u3000\s（）()]+$/.test(text);
+              return hasSlotClass || (boxLike && (emptyLike || text.length <= 4));
+            });
+          const pickSlot = slotNodes.find((item) => {
+            const text = normalize(item.textContent);
+            return !text || /^[_\u3000\s（）()]+$/.test(text);
+          }) || slotNodes[0];
+          if (!pickSlot) return null;
+          const rect = pickSlot.getBoundingClientRect();
+          return {
+            x: rect.left + rect.width / 2,
+            y: rect.top + rect.height / 2,
+          };
+        });
+        if (slot) {
+          await humanClickPoint(page, slot.x, slot.y, delay).catch(() => null);
+          await humanPause(delay, 100, 220);
+        }
+
+        const tokenPoint = await page.evaluate((expected) => {
           const normalize = (value: string | null | undefined) => (value || "").replace(/\s+/g, " ").trim();
           const isVisible = (el: HTMLElement) => {
             const rect = el.getBoundingClientRect();
@@ -734,15 +870,6 @@ export async function applyBlankAnswers(
               const emptyLike = !text || /^[_\u3000\s（）()]+$/.test(text);
               return hasSlotClass || (boxLike && (emptyLike || text.length <= 4));
             });
-          const pickSlot = slotNodes.find((item) => {
-            const text = normalize(item.textContent);
-            return !text || /^[_\u3000\s（）()]+$/.test(text);
-          }) || slotNodes[0];
-          if (pickSlot) {
-            pickSlot.scrollIntoView({ behavior: "smooth", block: "center" });
-            pickSlot.click();
-          }
-
           const nodes = Array.from(document.querySelectorAll<HTMLElement>(
             [
               ".q-tag-wrap .q-tag",
@@ -761,18 +888,20 @@ export async function applyBlankAnswers(
             ].join(", ")
           ));
           const node = nodes.find((item) => normalize(item.textContent) === expected && isVisible(item));
-          if (!node) return false;
+          if (!node) return null;
           node.scrollIntoView({ behavior: "smooth", block: "center" });
           const clickable = node.closest("button, a, li, [role='button'], .q-tag, .tag, .fill-answer") as HTMLElement | null;
           const target = (clickable || node) as HTMLElement;
-          target.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
-          target.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
-          target.click?.();
-          return true;
+          const rect = target.getBoundingClientRect();
+          return {
+            x: rect.left + rect.width / 2,
+            y: rect.top + rect.height / 2,
+          };
         }, token);
-        if (clicked) {
+        if (tokenPoint) {
+          await humanClickPoint(page, tokenPoint.x, tokenPoint.y, delay);
           clickedTokens.push(token);
-          await delay(120, 220);
+          await delay(140, 320);
         }
       }
     }
@@ -790,39 +919,26 @@ export async function applyBlankAnswers(
     }
   }
 
-  const applied = await page.evaluate((rawSuggestions) => {
-    const textInputs = Array.from(document.querySelectorAll<HTMLInputElement>("input[type='text'], input:not([type]), textarea"));
-    const editableNodes = Array.from(document.querySelectorAll<HTMLElement>("[contenteditable='true']"));
-    const fields = [...textInputs, ...editableNodes].filter((node) => {
-      const style = getComputedStyle(node as HTMLElement);
-      return style.display !== "none" && style.visibility !== "hidden";
-    });
+  const fields = await page.$$("input[type='text'], input:not([type]), textarea, [contenteditable='true']");
+  const applied: string[] = [];
 
-    const appliedValues: string[] = [];
-    for (let index = 0; index < Math.min(fields.length, rawSuggestions.length); index++) {
-      const field = fields[index];
-      if (!field) continue;
-      const value = rawSuggestions[index];
-      if (!value) continue;
+  for (let index = 0; index < Math.min(fields.length, suggestions.length); index++) {
+    const field = fields[index];
+    const value = suggestions[index];
+    if (!field || !value) continue;
 
-      if (field instanceof HTMLInputElement || field instanceof HTMLTextAreaElement) {
-        field.focus();
-        field.value = value;
-        field.dispatchEvent(new Event("input", { bubbles: true }));
-        field.dispatchEvent(new Event("change", { bubbles: true }));
-        appliedValues.push(value);
-        continue;
-      }
-
-      field.focus();
-      field.textContent = value;
-      field.dispatchEvent(new Event("input", { bubbles: true }));
-      field.dispatchEvent(new Event("change", { bubbles: true }));
-      appliedValues.push(value);
-    }
-
-    return appliedValues;
-  }, suggestions);
+    const clicked = await humanClickElement(page, field, delay).catch(() => false);
+    if (!clicked) continue;
+    await humanPause(delay, 100, 240);
+    await page.keyboard.down("Meta").catch(() => null);
+    await page.keyboard.press("A").catch(() => null);
+    await page.keyboard.up("Meta").catch(() => null);
+    await page.keyboard.press("Backspace").catch(() => null);
+    await humanPause(delay, 80, 180);
+    await humanTypeText(page, value, delay);
+    applied.push(value);
+    await humanPause(delay, 180, 340);
+  }
 
   if (applied.length > 0) {
     await delay(600, 1000);
@@ -863,7 +979,7 @@ export async function applyBlankAnswers(
     const answer = suggestions[i];
     if (!answer) continue;
 
-    await page.mouse.click(slot.x, slot.y);
+    await humanClickPoint(page, slot.x, slot.y, delay);
     await delay(120, 220);
     const editableFocused = await page.evaluate(() => {
       const active = document.activeElement as HTMLElement | null;
@@ -880,7 +996,7 @@ export async function applyBlankAnswers(
       await page.keyboard.up("Meta").catch(() => null);
       await page.keyboard.press("Backspace").catch(() => null);
     }
-    await page.keyboard.type(answer, { delay: 30 });
+    await humanTypeText(page, answer, delay);
     const wrote = await page.evaluate((expected) => {
       const active = document.activeElement as HTMLElement | null;
       const fromActive = (() => {
@@ -910,33 +1026,36 @@ export async function applyBlankAnswers(
 }
 
 export async function previewQuestionVideo(page: Page, delay: (min: number, max: number) => Promise<void>, previewSeconds: number): Promise<void> {
-  const playAttempt = await page.evaluate(async () => {
-    const video = document.querySelector("video");
-    if (!video) return "no_video";
+  let playAttempt = "no_video";
+  const playBtn = await page.$(".prism-play-btn, .prism-big-play-btn, [class*='play']");
+  const videoExists = await page.$("video");
 
-    const playBtn = document.querySelector(".prism-play-btn") as HTMLElement
-      || document.querySelector(".prism-big-play-btn") as HTMLElement
-      || document.querySelector("[class*='play']") as HTMLElement;
-
-    if (playBtn) {
-      playBtn.click();
-      await new Promise((resolve) => setTimeout(resolve, 800));
-      if (!video.paused) return "clicked";
-    }
-
-    try {
-      await video.play();
-      return "js_play";
-    } catch {
-      return "failed";
-    }
-  });
+  if (playBtn && videoExists) {
+    const clicked = await humanClickElement(page, playBtn, delay).catch(() => false);
+    await humanPause(delay, 700, 1100);
+    const paused = await page.evaluate(() => {
+      const video = document.querySelector("video");
+      return video ? (video as HTMLVideoElement).paused : true;
+    }).catch(() => true);
+    playAttempt = clicked && !paused ? "clicked" : "uncertain";
+  } else if (videoExists) {
+    playAttempt = await page.evaluate(async () => {
+      const video = document.querySelector("video") as HTMLVideoElement | null;
+      if (!video) return "no_video";
+      try {
+        await video.play();
+        return "js_play";
+      } catch {
+        return "failed";
+      }
+    });
+  }
 
   console.log(`[测验任务] 视频题播放尝试结果：${playAttempt}`);
   await delay(previewSeconds * 1000, previewSeconds * 1000);
 }
 
-async function clickQuizAction(page: Page, labels: string[]): Promise<boolean> {
+async function clickQuizAction(page: Page, labels: string[], delay: (min: number, max: number) => Promise<void>): Promise<boolean> {
   const selectors = [".ant-btn", "button", "[role='button']", "a[role='button']"];
   for (const selector of selectors) {
     const nodes = await page.$$(selector);
@@ -949,10 +1068,8 @@ async function clickQuizAction(page: Page, labels: string[]): Promise<boolean> {
         await page.evaluate((el) => {
           (el as HTMLElement).scrollIntoView({ behavior: "smooth", block: "center" });
         }, node);
-        const box = await node.boundingBox();
-        if (box) {
-          await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
-        } else {
+        const clicked = await humanClickElement(page, node, delay);
+        if (!clicked) {
           await node.click();
         }
         return true;
@@ -992,7 +1109,7 @@ export async function submitCurrentAnswer(
     return false;
   };
 
-  const submitted = await clickQuizAction(page, ["确定", "提交", "完成"]);
+  const submitted = await clickQuizAction(page, ["确定", "提交", "完成"], delay);
   if (!submitted) {
     return { submitted: false, advanced: false, finished: false };
   }
@@ -1005,7 +1122,7 @@ export async function submitCurrentAnswer(
     return { submitted: true, advanced: true, finished: false };
   }
 
-  const advanced = await clickQuizAction(page, ["下一题", "完成"]);
+  const advanced = await clickQuizAction(page, ["下一题", "完成"], delay);
   if (!advanced) {
     if (await waitForAdvance(extraAdvanceAttempts)) {
       return { submitted: true, advanced: true, finished: false };
