@@ -65,6 +65,23 @@ export function normalizeArticleSeriesTitle(rawText: string): string {
     .trim();
 }
 
+export function isSeriesDirectoryShape(input: {
+  heading: string;
+  repeatedSeriesEntryCount: number;
+  matchingSeriesLinkCount: number;
+  longParagraphCount: number;
+  maxContentLength: number;
+}): boolean {
+  const compactHeading = input.heading.replace(/\s+/g, "");
+  const headingLooksLikeSeriesEntry = /^VW\d+\.\d+/i.test(compactHeading);
+  return (
+    headingLooksLikeSeriesEntry &&
+    input.longParagraphCount < 2 &&
+    input.maxContentLength < 1400 &&
+    (input.repeatedSeriesEntryCount >= 6 || input.matchingSeriesLinkCount >= 4)
+  );
+}
+
 export function normalizeArticleUrl(rawUrl: string): string {
   try {
     const url = new URL(rawUrl);
@@ -342,6 +359,14 @@ export async function validateArticlePage(page: Page, expectedTitle: string): Pr
       return true;
     };
 
+    const normalizeSeriesTitle = (value: string | null | undefined) => (value || "")
+      .replace(/\s+/g, "")
+      .replace(/^VW\d+\.\d+\s*/i, "")
+      .replace(/^\d{3}\s*/i, "")
+      .replace(/（\d{4}年.*?）/g, "")
+      .replace(/\d{4}-\d{2}-\d{2}/g, "")
+      .trim();
+
     const currentUrl = location.href.toLowerCase();
     const title = document.title;
     const titleBlacklist = ["版权", "隐私", "声明", "法律", "政策", "搜索", "登录", "积分", "用户", "账号"];
@@ -376,6 +401,30 @@ export async function validateArticlePage(page: Page, expectedTitle: string): Pr
       .map((node) => (node.textContent || "").replace(/\s+/g, " ").trim())
       .filter((text) => /^VW\d+\.\d+/.test(text) || /\d{4}-\d{2}-\d{2}/.test(text))
       .length;
+    const normalizedHeadingSeries = normalizeSeriesTitle(heading);
+    const matchingSeriesLinkCount = Array.from(document.querySelectorAll<HTMLAnchorElement>("a[href]"))
+      .map((anchor) => {
+        const text = (anchor.textContent || "").replace(/\s+/g, " ").trim();
+        const normalizedTitle = normalizeSeriesTitle(text);
+        const rowText = (anchor.parentElement?.textContent || anchor.closest("li, tr, .item, .text-link-item, .grid-cell")?.textContent || "")
+          .replace(/\s+/g, " ")
+          .trim();
+        const rect = anchor.getBoundingClientRect();
+        const inLeftColumn = rect.left < window.innerWidth * 0.7;
+        return {
+          normalizedTitle,
+          inLeftColumn,
+          hasDate: /\d{4}-\d{2}-\d{2}/.test(rowText),
+          hasYearTag: /（\d{4}年/.test(text) || /（\d{4}年/.test(rowText),
+        };
+      })
+      .filter((item) => {
+        if (!normalizedHeadingSeries || !item.normalizedTitle) return false;
+        if (!item.inLeftColumn) return false;
+        if (!item.normalizedTitle.includes(normalizedHeadingSeries)) return false;
+        return item.hasDate || item.hasYearTag;
+      })
+      .length;
     const searchInput = document.querySelector("input[type='search'], input[placeholder*='搜索'], input[placeholder*='关键字']");
     const hasSearchResultsHeading = /搜索结果|共找到|条结果/.test(articleMeta);
 
@@ -395,6 +444,14 @@ export async function validateArticlePage(page: Page, expectedTitle: string): Pr
     }
     if (repeatedSeriesEntryCount >= 6 && longP.length < 2 && maxContentLength < 900) {
       return { ok: false, reason: "页面更像专题目录页" } as const;
+    }
+    if (
+      /^VW\d+\.\d+/i.test(heading.replace(/\s+/g, "")) &&
+      longP.length < 2 &&
+      maxContentLength < 1400 &&
+      (repeatedSeriesEntryCount >= 6 || matchingSeriesLinkCount >= 4)
+    ) {
+      return { ok: false, reason: "页面更像系列目录页" } as const;
     }
     if (listItemCount >= 12 && longP.length < 2 && maxContentLength < 800) {
       return { ok: false, reason: "页面以列表聚合为主" } as const;

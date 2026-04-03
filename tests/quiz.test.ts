@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  applySuggestedAnswers,
   deriveBlankSuggestion,
   deriveChoiceSuggestions,
   deriveOrderedBlankSuggestions,
@@ -108,6 +109,96 @@ D. 主导权和主动权
       "B. 在火堆余烬彻底熄灭前离开",
       "C. 冒风紧邻机动车烧纸",
     ]);
+  });
+
+  test("applies each matched multi-choice text only once when DOM contains duplicate nodes", async () => {
+    class FakeNode {
+      constructor(
+        readonly text: string,
+        readonly box: { x: number; y: number; width: number; height: number; }
+      ) {}
+
+      async boundingBox() {
+        return this.box;
+      }
+
+      async evaluate<T>(_pageFunction: (element: Element) => T | Promise<T>) {
+        return undefined as T;
+      }
+    }
+
+    class FakePage {
+      selected = new Set<string>();
+      lastPoint = { x: 0, y: 0 };
+
+      constructor(readonly nodes: FakeNode[]) {}
+
+      mouse = {
+        move: async (x: number, y: number) => {
+          this.lastPoint = { x, y };
+        },
+        down: async () => undefined,
+        up: async () => {
+          const hit = this.nodes.find((node) => {
+            const { x, y, width, height } = node.box;
+            return (
+              this.lastPoint.x >= x &&
+              this.lastPoint.x <= x + width &&
+              this.lastPoint.y >= y &&
+              this.lastPoint.y <= y + height
+            );
+          });
+          if (!hit) return;
+          if (this.selected.has(hit.text)) {
+            this.selected.delete(hit.text);
+          } else {
+            this.selected.add(hit.text);
+          }
+        },
+      };
+
+      async $$(selector: string) {
+        if (selector !== ".q-answer.choosable, .q-answer") {
+          return [];
+        }
+        return this.nodes;
+      }
+
+      async evaluate<T>(_pageFunction: unknown, arg?: unknown) {
+        if (arg instanceof FakeNode) {
+          return arg.text as T;
+        }
+        if (typeof arg === "string") {
+          return this.selected.has(arg) as T;
+        }
+        return undefined as T;
+      }
+    }
+
+    const page = new FakePage([
+      new FakeNode("A. 鲜花祭祀", { x: 10, y: 10, width: 80, height: 20 }),
+      new FakeNode("A. 鲜花祭祀", { x: 10, y: 40, width: 80, height: 20 }),
+      new FakeNode("B. 植树缅怀", { x: 10, y: 70, width: 80, height: 20 }),
+      new FakeNode("C. 家庭追思", { x: 10, y: 100, width: 80, height: 20 }),
+    ]);
+
+    const applied = await applySuggestedAnswers(
+      page as never,
+      {
+        stem: "现如今，倡导采用（）、（）、（）等方式，文明祭扫、绿色追思。",
+        options: ["A. 鲜花祭祀", "B. 植树缅怀", "C. 家庭追思"],
+        questionType: "multiple",
+        blankCount: 0,
+        hasVideo: false,
+        currentIndex: 1,
+        totalQuestions: 5,
+      },
+      ["A. 鲜花祭祀", "B. 植树缅怀", "C. 家庭追思"],
+      async () => undefined
+    );
+
+    expect(applied).toEqual(["A. 鲜花祭祀", "B. 植树缅怀", "C. 家庭追思"]);
+    expect(Array.from(page.selected)).toEqual(["A. 鲜花祭祀", "B. 植树缅怀", "C. 家庭追思"]);
   });
 
   test("tokenizes blank answer by candidate chips", () => {

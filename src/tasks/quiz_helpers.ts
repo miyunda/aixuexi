@@ -308,6 +308,17 @@ export function matchSuggestedOptions(optionTexts: string[], suggestions: string
   });
 }
 
+function dedupeTexts(texts: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const text of texts.map((item) => normalizeQuizText(item)).filter(Boolean)) {
+    if (seen.has(text)) continue;
+    seen.add(text);
+    out.push(text);
+  }
+  return out;
+}
+
 export async function navigateToDailyQuiz(page: Page, delay: (min: number, max: number) => Promise<void>): Promise<void> {
   await page.goto("https://pc.xuexi.cn/points/my-points.html", { waitUntil: "networkidle2" });
   await delay(2500, 3500);
@@ -667,6 +678,29 @@ async function readOptionSelectionState(page: Page, expectedText: string): Promi
   }, expectedText);
 }
 
+async function findOptionNodeByText(
+  page: Page,
+  expectedText: string
+): Promise<{
+  boundingBox: () => Promise<{ x: number; y: number; width: number; height: number; } | null>;
+  evaluate: <T>(pageFunction: (element: Element) => T | Promise<T>) => Promise<T>;
+} | null> {
+  const optionNodes = await page.$$(".q-answer.choosable, .q-answer");
+  let fallback: typeof optionNodes[number] | null = null;
+
+  for (const node of optionNodes) {
+    const text = await page.evaluate((el) => (el.textContent || "").replace(/\s+/g, " ").trim(), node).catch(() => "");
+    if (normalizeQuizText(text) !== expectedText) continue;
+    fallback = fallback || node;
+    const box = await node.boundingBox().catch(() => null);
+    if (box && box.width > 0 && box.height > 0) {
+      return node;
+    }
+  }
+
+  return fallback;
+}
+
 export async function applySuggestedAnswers(
   page: Page,
   snapshot: QuizQuestionSnapshot,
@@ -677,18 +711,18 @@ export async function applySuggestedAnswers(
     return [];
   }
 
-  const matchedTexts = matchSuggestedOptions(snapshot.options, suggestions);
-  const optionNodes = await page.$$(".q-answer.choosable, .q-answer");
+  const matchedTexts = dedupeTexts(matchSuggestedOptions(snapshot.options, suggestions));
   const applied: string[] = [];
 
-  for (const node of optionNodes) {
-    const text = await page.evaluate((el) => (el.textContent || "").replace(/\s+/g, " ").trim(), node);
-    if (!matchedTexts.includes(text)) continue;
+  for (const text of matchedTexts) {
     const alreadySelected = await readOptionSelectionState(page, text).catch(() => false);
     if (alreadySelected) {
       applied.push(text);
       continue;
     }
+
+    const node = await findOptionNodeByText(page, text);
+    if (!node) continue;
 
     let selected = false;
     for (let attempt = 0; attempt < 3; attempt++) {

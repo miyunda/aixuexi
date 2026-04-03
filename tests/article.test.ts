@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { extractArticleTitle, isCandidateArticleUrl, isVideoDominatedArticleShape, looksLikeArticleTitle, normalizeArticleSeriesTitle, normalizeArticleUrl } from "../src/tasks/article_helpers";
+import { extractArticleTitle, isCandidateArticleUrl, isSeriesDirectoryShape, isVideoDominatedArticleShape, looksLikeArticleTitle, normalizeArticleSeriesTitle, normalizeArticleUrl } from "../src/tasks/article_helpers";
 
 describe("isCandidateArticleUrl", () => {
   test("accepts real article-style urls", () => {
@@ -86,6 +86,28 @@ describe("isVideoDominatedArticleShape", () => {
       maxContentLength: 980,
       bodyTextLength: 1800,
       hasLargeVideoPlayer: true,
+    })).toBe(false);
+  });
+});
+
+describe("isSeriesDirectoryShape", () => {
+  test("rejects series directory pages disguised as article detail", () => {
+    expect(isSeriesDirectoryShape({
+      heading: "VW001.001 习近平论坚持和发展中国特色社会主义 （2026年）2026-01-21",
+      repeatedSeriesEntryCount: 12,
+      matchingSeriesLinkCount: 8,
+      longParagraphCount: 0,
+      maxContentLength: 980,
+    })).toBe(true);
+  });
+
+  test("keeps real detail pages without repeated dated sibling entries", () => {
+    expect(isSeriesDirectoryShape({
+      heading: "VW001.001 习近平论坚持和发展中国特色社会主义 （2026年）2026-01-21",
+      repeatedSeriesEntryCount: 1,
+      matchingSeriesLinkCount: 1,
+      longParagraphCount: 4,
+      maxContentLength: 2400,
     })).toBe(false);
   });
 });
