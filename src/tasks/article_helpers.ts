@@ -65,12 +65,19 @@ export function normalizeArticleSeriesTitle(rawText: string): string {
     .trim();
 }
 
+export function looksLikeArticleSeriesSectionTitle(text: string): boolean {
+  const compact = text.replace(/\s+/g, "");
+  return /^\d{3}习近平论/.test(compact);
+}
+
 export function isSeriesDirectoryShape(input: {
   heading: string;
   repeatedSeriesEntryCount: number;
   matchingSeriesLinkCount: number;
   longParagraphCount: number;
   maxContentLength: number;
+  dateLikeCount?: number;
+  listItemCount?: number;
 }): boolean {
   const compactHeading = input.heading.replace(/\s+/g, "");
   const headingLooksLikeSeriesEntry = /^VW\d+\.\d+/i.test(compactHeading);
@@ -78,7 +85,11 @@ export function isSeriesDirectoryShape(input: {
     headingLooksLikeSeriesEntry &&
     input.longParagraphCount < 2 &&
     input.maxContentLength < 1400 &&
-    (input.repeatedSeriesEntryCount >= 6 || input.matchingSeriesLinkCount >= 4)
+    (
+      input.repeatedSeriesEntryCount >= 6 ||
+      input.matchingSeriesLinkCount >= 4 ||
+      ((input.dateLikeCount || 0) >= 4 && (input.listItemCount || 0) >= 8)
+    )
   );
 }
 
@@ -211,13 +222,15 @@ export async function collectArticleCandidates(page: Page, seenTitles: Set<strin
       }, title);
       if (isSectionLike) continue;
 
+      const kind: "article" | "section" = looksLikeArticleSeriesSectionTitle(title) ? "section" : "article";
+
       seen.add(title);
       results.push({
         text: title,
         selector,
         index,
         source: "card",
-        kind: "article",
+        kind,
       });
     }
   }
@@ -366,6 +379,28 @@ export async function validateArticlePage(page: Page, expectedTitle: string): Pr
       .replace(/（\d{4}年.*?）/g, "")
       .replace(/\d{4}-\d{2}-\d{2}/g, "")
       .trim();
+    const isSeriesDirectory = (input: {
+      heading: string;
+      repeatedSeriesEntryCount: number;
+      matchingSeriesLinkCount: number;
+      longParagraphCount: number;
+      maxContentLength: number;
+      dateLikeCount: number;
+      listItemCount: number;
+    }) => {
+      const compactHeading = input.heading.replace(/\s+/g, "");
+      const headingLooksLikeSeriesEntry = /^VW\d+\.\d+/i.test(compactHeading);
+      return (
+        headingLooksLikeSeriesEntry &&
+        input.longParagraphCount < 2 &&
+        input.maxContentLength < 1400 &&
+        (
+          input.repeatedSeriesEntryCount >= 6 ||
+          input.matchingSeriesLinkCount >= 4 ||
+          (input.dateLikeCount >= 4 && input.listItemCount >= 8)
+        )
+      );
+    };
 
     const currentUrl = location.href.toLowerCase();
     const title = document.title;
@@ -445,12 +480,15 @@ export async function validateArticlePage(page: Page, expectedTitle: string): Pr
     if (repeatedSeriesEntryCount >= 6 && longP.length < 2 && maxContentLength < 900) {
       return { ok: false, reason: "页面更像专题目录页" } as const;
     }
-    if (
-      /^VW\d+\.\d+/i.test(heading.replace(/\s+/g, "")) &&
-      longP.length < 2 &&
-      maxContentLength < 1400 &&
-      (repeatedSeriesEntryCount >= 6 || matchingSeriesLinkCount >= 4)
-    ) {
+    if (isSeriesDirectory({
+      heading,
+      repeatedSeriesEntryCount,
+      matchingSeriesLinkCount,
+      longParagraphCount: longP.length,
+      maxContentLength,
+      dateLikeCount,
+      listItemCount,
+    })) {
       return { ok: false, reason: "页面更像系列目录页" } as const;
     }
     if (listItemCount >= 12 && longP.length < 2 && maxContentLength < 800) {
