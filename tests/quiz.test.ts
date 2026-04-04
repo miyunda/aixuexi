@@ -4,9 +4,13 @@ import {
   deriveBlankSuggestion,
   deriveChoiceSuggestions,
   deriveOrderedBlankSuggestions,
+  hasAdvancedToDifferentQuestion,
   matchSuggestedOptions,
   normalizeQuizText,
   parseQuestionFromRawText,
+  pickSingleBlankFromHighlights,
+  resolveQuestionTypeFromSnapshot,
+  sortVisualSlots,
   tokenizeBlankAnswerByCandidates,
 } from "../src/tasks/quiz_helpers";
 
@@ -48,6 +52,18 @@ describe("quiz helpers", () => {
     const stem = "2014年6月，习近平总书记对禁毒工作作出重要指示强调，各级党委和政府要深刻认识毒品问题的危害性、深刻认识做好禁毒工作的重要性，以对人民的精神，加强组织领导，采取有力措施，持之以恒把禁毒工作深入开展下去。";
     const hint = "2014年6月，习近平总书记对禁毒工作作出重要指示强调，各级党委和政府要深刻认识毒品问题的危害性、深刻认识做好禁毒工作的重要性，以对人民高度负责的精神，加强组织领导，采取有力措施，持之以恒把禁毒工作深入开展下去。";
     expect(deriveOrderedBlankSuggestions(stem, hint, 1)).toEqual(["高度负责"]);
+  });
+
+  test("derives single blank suggestion from long hint text without falling back to the whole sentence", () => {
+    const stem = "2025年4月25日，习近平在中共二十届中央政治局第二十次集体学习时指出，要推动人工智能科技创新与产业创新深度融合，构建主导的产学研用协同创新体系，助力传统产业改造升级，开辟战略性新兴产业和未来产业发展新赛道。统筹推进算力基础设施建设，深化数据资源开发利用和开放共享。";
+    const hint = "2025年4月25日，习近平在中共二十届中央政治局第二十次集体学习时指出，我国数据资源丰富，产业体系完备，应用场景广阔，市场空间巨大。要推动人工智能科技创新与产业创新深度融合，构建企业主导的产学研用协同创新体系，助力传统产业改造升级，开辟战略性新兴产业和未来产业发展新赛道。统筹推进算力基础设施建设，深化数据资源开发利用和开放共享。";
+    expect(deriveOrderedBlankSuggestions(stem, hint, 1)).toEqual(["企业"]);
+  });
+
+  test("derives compact phrase for multi-slot click blank without falling back to the whole sentence", () => {
+    const stem = "天津市蓟州区隆福寺村成村于乾隆九年，因修建隆福寺行宫得名。村内保留有两处满族风情传统民居，是天津市唯一少数民族乡——满族乡中七个满族聚居村之一。2023年，隆福寺村入选第六批中国传统村落名录。";
+    const hint = "天津市蓟州区隆福寺村成村于乾隆九年，因修建隆福寺行宫得名。村内保留有两处满族风情传统民居，是天津市唯一少数民族乡——孙各庄满族乡中七个满族聚居村之一。2023年，隆福寺村入选第六批中国传统村落名录。";
+    expect(deriveOrderedBlankSuggestions(stem, hint, 3)).toEqual(["孙各庄"]);
   });
 
   test("parses multiple-choice question stem and options from raw text", () => {
@@ -216,5 +232,81 @@ D. 主导权和主动权
       "国家级",
       "保密",
     ]);
+  });
+
+  test("tokenizes mixed-length click-blank candidates, not only single characters", () => {
+    const candidates = ["张三", "李四", "赵二麻子"];
+    expect(tokenizeBlankAnswerByCandidates("张三李四赵二麻子", candidates)).toEqual([
+      "张三",
+      "李四",
+      "赵二麻子",
+    ]);
+  });
+
+  test("treats unchanged quiz snapshot as not advanced", () => {
+    expect(hasAdvancedToDifferentQuestion(
+      { stem: "屯留道情是主要流行于晋东南地区……多为（）演出。", currentIndex: 4 },
+      { stem: "屯留道情是主要流行于晋东南地区……多为（）演出。", currentIndex: 4 },
+    )).toBe(false);
+  });
+
+  test("treats changed quiz index or stem as advanced", () => {
+    expect(hasAdvancedToDifferentQuestion(
+      { stem: "上一题", currentIndex: 4 },
+      { stem: "下一题", currentIndex: 4 },
+    )).toBe(true);
+
+    expect(hasAdvancedToDifferentQuestion(
+      { stem: "上一题", currentIndex: 4 },
+      { stem: "上一题", currentIndex: 5 },
+    )).toBe(true);
+  });
+
+  test("sorts blank slots by visual order instead of DOM order", () => {
+    expect(sortVisualSlots([
+      { x: 120, y: 80, text: "第三空" },
+      { x: 40, y: 80, text: "第一空" },
+      { x: 80, y: 80, text: "第二空" },
+      { x: 20, y: 108, text: "下一行" },
+    ])).toEqual([
+      { x: 40, y: 80, text: "第一空" },
+      { x: 80, y: 80, text: "第二空" },
+      { x: 120, y: 80, text: "第三空" },
+      { x: 20, y: 108, text: "下一行" },
+    ]);
+  });
+
+  test("prefers choice question type when options exist even if visual blanks are detected", () => {
+    expect(resolveQuestionTypeFromSnapshot({
+      parsedQuestionType: "unknown",
+      parsedOptionsCount: 3,
+      selectorOptionsCount: 3,
+      inputBlankCount: 0,
+      visualBlankCount: 3,
+    })).toBe("multiple");
+
+    expect(resolveQuestionTypeFromSnapshot({
+      parsedQuestionType: "multiple",
+      parsedOptionsCount: 3,
+      selectorOptionsCount: 3,
+      inputBlankCount: 0,
+      visualBlankCount: 3,
+    })).toBe("multiple");
+  });
+
+  test("treats parsed blank question as single blank when only one real blank is detected", () => {
+    expect(resolveQuestionTypeFromSnapshot({
+      parsedQuestionType: "single_blank",
+      parsedOptionsCount: 0,
+      selectorOptionsCount: 0,
+      inputBlankCount: 0,
+      visualBlankCount: 1,
+    })).toBe("single_blank");
+  });
+
+  test("picks the most plausible single-blank highlight instead of the whole sentence", () => {
+    const stem = "2026年1月15日起，铁路部门在东北环线6趟列车试点推出“便利行”服务，旅客可随车携带雪具并存放在列车指定位置，让“乘着高铁去滑雪”更加方便快捷。";
+    const hint = "2026年1月15日起，铁路部门在东北环线6趟列车试点推出“雪具便利行”服务，旅客可随车携带雪具并存放在列车指定位置，让“乘着高铁去滑雪”更加方便快捷。";
+    expect(pickSingleBlankFromHighlights(stem, hint, ["雪具", "滑雪"])).toBe("滑雪");
   });
 });
