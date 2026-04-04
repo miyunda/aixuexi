@@ -2,7 +2,7 @@ export interface LlmQuizRequest {
   stem: string;
   options: string[];
   hintText: string;
-  questionType: "single" | "multiple" | "blank" | "unknown";
+  questionType: "single" | "multiple" | "single_blank" | "multi_blank" | "unknown";
   blankCount?: number;
 }
 
@@ -82,7 +82,8 @@ function buildPrompt(request: LlmQuizRequest): string {
     "要求：",
     "- 单选题 answers 只放 1 个答案，可以是选项全文，也可以是“正确/错误”这种答案文本。",
     "- 多选题 answers 放多个答案，保持题目顺序。",
-    "- 填空题 answers 按空格顺序填写。",
+    "- 单空填空题 answers 只放 1 个答案。",
+    "- 多空填空题 answers 按空格顺序填写多个答案。",
     "- 如果无法可靠判断，answers 返回空数组。",
     "",
     `题型: ${request.questionType}`,
