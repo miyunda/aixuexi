@@ -84,14 +84,38 @@ async function processCandidate(
   let siteCheck;
 
   if (item.kind === "section") {
-    const nestedPage = await openArticleFromSectionPage(articlePage, item.text, delay);
-    if (!nestedPage) {
-      console.log("[文章任务] => 已进入列表页，但未找到可阅读的正文链接，放弃。");
+    const nestedExtraction = await collectArticleCandidates(
+      articlePage,
+      new Set([...seenTitles, ...invalidTitles, item.text]),
+    );
+    const nestedCandidates = nestedExtraction.results;
+
+    if (nestedCandidates.length > 0) {
+      console.log(`[文章任务] => 已进入子频道列表，找到 ${nestedExtraction.count} 篇候选正文。`);
+      const nestedItem = nestedCandidates.slice(0, 6).sort(() => 0.5 - Math.random())[0] ?? nestedCandidates[0];
+      if (nestedItem) {
+        console.log(`[文章任务] => 子频道内选中文章：${nestedItem.text}`);
+        const nestedPage = await openArticleFromCandidate(articlePage, nestedItem, delay);
+        if (nestedPage) {
+          readingPage = nestedPage;
+        }
+      }
+    }
+
+    if (readingPage === articlePage) {
+      const nestedPage = await openArticleFromSectionPage(articlePage, item.text, delay);
+      if (nestedPage) {
+        readingPage = nestedPage;
+      }
+    }
+
+    if (readingPage === articlePage) {
+      console.log("[文章任务] => 已进入子频道列表，但未找到可阅读的正文链接，放弃。");
       invalidTitles.add(item.text);
       await recoverToChannelPage(page, articlePage, channelUrl);
       return false;
     }
-    readingPage = nestedPage;
+
     siteCheck = await validateArticlePage(readingPage, item.text);
   } else {
     siteCheck = await validateArticlePage(readingPage, item.text);
