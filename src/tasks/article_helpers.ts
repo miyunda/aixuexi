@@ -457,6 +457,7 @@ export async function validateArticlePage(page: Page, expectedTitle: string): Pr
     const dateLikeCount = (document.body.innerText.match(/\d{4}-\d{2}-\d{2}/g) || []).length;
     const anchorCount = document.querySelectorAll("a").length;
     const listItemCount = document.querySelectorAll("li, .item, .text-link-item, .grid-cell, [class*='item']").length;
+    const textLinkItemTitleCount = document.querySelectorAll(".text-link-item-title").length;
     const repeatedSeriesEntryCount = Array.from(document.querySelectorAll("a[href], li, tr"))
       .map((node) => (node.textContent || "").replace(/\s+/g, " ").trim())
       .filter((text) => /^VW\d+\.\d+/.test(text) || /\d{4}-\d{2}-\d{2}/.test(text))
@@ -524,6 +525,9 @@ export async function validateArticlePage(page: Page, expectedTitle: string): Pr
     }
     if ((searchInput || hasSearchResultsHeading) && maxContentLength < 600 && longP.length < 2) {
       return { ok: false, reason: "页面更像搜索结果页" } as const;
+    }
+    if (textLinkItemTitleCount >= 8 && longP.length < 2 && !hasPublishMeta) {
+      return { ok: false, reason: "页面更像文本列表页" } as const;
     }
     if (dateLikeCount >= 6 && anchorCount >= 20 && longP.length < 2 && maxContentLength < 800) {
       return { ok: false, reason: "页面更像文章列表页" } as const;
