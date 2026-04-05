@@ -19,6 +19,42 @@ import {
 } from "./quiz_helpers";
 import { delay } from "./timing";
 
+function waitForTerminalContinue(): { promise: Promise<"terminal">; cancel: () => void } {
+  let settled = false;
+  const stdin = process.stdin;
+
+  const cleanup = () => {
+    stdin.off("data", onData);
+    if (stdin.isTTY) {
+      stdin.pause();
+    }
+  };
+
+  const onData = () => {
+    if (settled) return;
+    settled = true;
+    cleanup();
+    resolvePromise("terminal");
+  };
+
+  let resolvePromise!: (value: "terminal") => void;
+  const promise = new Promise<"terminal">((resolve) => {
+    resolvePromise = resolve;
+  });
+
+  stdin.resume();
+  stdin.once("data", onData);
+
+  return {
+    promise,
+    cancel: () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+    },
+  };
+}
+
 async function injectContinueOverlay(page: Page, token: string, message: string): Promise<void> {
   await page.evaluate(({ currentToken, currentMessage }) => {
     const existing = document.getElementById("aixuexi-continue-overlay");
@@ -73,21 +109,32 @@ async function removeContinueOverlay(page: Page): Promise<void> {
 async function waitForUserContinue(page: Page, message: string): Promise<void> {
   const token = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   console.log(message);
-  await injectContinueOverlay(page, token, message);
+  const terminalWaiter = waitForTerminalContinue();
 
-  while (true) {
-    const clicked = await page.evaluate((expectedToken) => {
-      return (window as typeof window & { __aixuexiContinueToken?: string }).__aixuexiContinueToken === expectedToken;
-    }, token).catch(() => false);
+  const pageWaiter = (async (): Promise<"page"> => {
+    while (true) {
+      await injectContinueOverlay(page, token, message).catch(() => null);
 
-    if (clicked) {
-      break;
+      const clicked = await page.evaluate((expectedToken) => {
+        return (window as typeof window & { __aixuexiContinueToken?: string }).__aixuexiContinueToken === expectedToken;
+      }, token).catch(() => false);
+
+      if (clicked) {
+        return "page";
+      }
+
+      await new Promise<void>((resolve) => setTimeout(resolve, 350));
     }
+  })();
 
-    await new Promise<void>((resolve) => setTimeout(resolve, 350));
-  }
+  const continueFrom = await Promise.race([pageWaiter, terminalWaiter.promise]).finally(() => {
+    terminalWaiter.cancel();
+  });
 
   await removeContinueOverlay(page);
+  if (continueFrom === "terminal") {
+    console.log("已收到终端回车，继续执行。");
+  }
 }
 
 async function handleLegacyManualQuiz(page: Page, score: number, max: number): Promise<void> {
