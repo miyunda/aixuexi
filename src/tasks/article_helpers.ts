@@ -74,6 +74,7 @@ export function isSeriesDirectoryShape(input: {
   heading: string;
   repeatedSeriesEntryCount: number;
   matchingSeriesLinkCount: number;
+  matchingSeriesAlternateLinkCount?: number;
   longParagraphCount: number;
   maxContentLength: number;
   dateLikeCount?: number;
@@ -88,6 +89,7 @@ export function isSeriesDirectoryShape(input: {
     (
       input.repeatedSeriesEntryCount >= 6 ||
       input.matchingSeriesLinkCount >= 4 ||
+      ((input.matchingSeriesAlternateLinkCount || 0) >= 1 && input.longParagraphCount < 3) ||
       ((input.dateLikeCount || 0) >= 4 && (input.listItemCount || 0) >= 8)
     )
   );
@@ -309,6 +311,7 @@ export async function openArticleFromSectionPage(
 ): Promise<Page | null> {
   const originalUrl = page.url();
   const nestedHref = await page.evaluate((rawExpectedTitle) => {
+    const currentUrl = location.href;
     const normalize = (value: string | null | undefined) => (value || "").replace(/\s+/g, "").trim();
     const normalizeSeriesTitle = (value: string | null | undefined) => normalize(value)
       .replace(/^VW\d+\.\d+/i, "")
@@ -329,6 +332,25 @@ export async function openArticleFromSectionPage(
         const hasDate = /\d{4}-\d{2}-\d{2}/.test(rowText);
         const hasYearTag = /（\d{4}年/.test(text) || /（\d{4}年/.test(anchor.parentElement?.textContent || "");
         const inLeftColumn = rect.left < window.innerWidth * 0.7;
+        const exactSeriesEntry = /^VW\d+\.\d+/i.test(compact);
+        let score = 0;
+        if (exactSeriesEntry) score += 8;
+        if (hasDate) score += 4;
+        if (hasYearTag) score += 3;
+        if (normalizedTitle === expected) score += 4;
+        else if (normalizedTitle.startsWith(expected) || expected.startsWith(normalizedTitle)) score += 2;
+        try {
+          const hrefUrl = new URL(anchor.href, currentUrl);
+          const pathname = hrefUrl.pathname.toLowerCase();
+          if (hrefUrl.hostname === "article.xuexi.cn") score += 10;
+          if (pathname.includes("/detail/")) score += 8;
+          if (pathname.includes("lgpage/detail")) score += 8;
+          if (/\/articles\/.*\.html$/.test(pathname)) score += 6;
+          if (pathname.endsWith(".html")) score += 1;
+          if (hrefUrl.toString() === currentUrl) score -= 20;
+        } catch {
+          score -= 10;
+        }
         return {
           href: anchor.href,
           compact,
@@ -337,6 +359,7 @@ export async function openArticleFromSectionPage(
           hasYearTag,
           inLeftColumn,
           top: rect.top,
+          score,
         };
       })
       .filter((item) => {
@@ -345,7 +368,7 @@ export async function openArticleFromSectionPage(
         if (!item.normalizedTitle || !item.normalizedTitle.includes(expected)) return false;
         return item.hasDate || item.hasYearTag;
       })
-      .sort((a, b) => a.top - b.top);
+      .sort((a, b) => (b.score - a.score) || (a.top - b.top));
 
     return candidates[0]?.href || "";
   }, expectedTitle);
@@ -383,6 +406,7 @@ export async function validateArticlePage(page: Page, expectedTitle: string): Pr
       heading: string;
       repeatedSeriesEntryCount: number;
       matchingSeriesLinkCount: number;
+      matchingSeriesAlternateLinkCount: number;
       longParagraphCount: number;
       maxContentLength: number;
       dateLikeCount: number;
@@ -397,6 +421,7 @@ export async function validateArticlePage(page: Page, expectedTitle: string): Pr
         (
           input.repeatedSeriesEntryCount >= 6 ||
           input.matchingSeriesLinkCount >= 4 ||
+          (input.matchingSeriesAlternateLinkCount >= 1 && input.longParagraphCount < 3) ||
           (input.dateLikeCount >= 4 && input.listItemCount >= 8)
         )
       );
@@ -460,6 +485,32 @@ export async function validateArticlePage(page: Page, expectedTitle: string): Pr
         return item.hasDate || item.hasYearTag;
       })
       .length;
+    const matchingSeriesAlternateLinkCount = Array.from(document.querySelectorAll<HTMLAnchorElement>("a[href]"))
+      .map((anchor) => {
+        const text = (anchor.textContent || "").replace(/\s+/g, " ").trim();
+        const normalizedTitle = normalizeSeriesTitle(text);
+        const rowText = (anchor.parentElement?.textContent || anchor.closest("li, tr, .item, .text-link-item, .grid-cell")?.textContent || "")
+          .replace(/\s+/g, " ")
+          .trim();
+        const rect = anchor.getBoundingClientRect();
+        const inLeftColumn = rect.left < window.innerWidth * 0.7;
+        const href = anchor.href || "";
+        return {
+          href,
+          normalizedTitle,
+          inLeftColumn,
+          hasDate: /\d{4}-\d{2}-\d{2}/.test(rowText),
+          hasYearTag: /（\d{4}年/.test(text) || /（\d{4}年/.test(rowText),
+        };
+      })
+      .filter((item) => {
+        if (!normalizedHeadingSeries || !item.normalizedTitle) return false;
+        if (!item.inLeftColumn) return false;
+        if (!item.href || item.href === location.href) return false;
+        if (item.normalizedTitle !== normalizedHeadingSeries) return false;
+        return item.hasDate || item.hasYearTag;
+      })
+      .length;
     const searchInput = document.querySelector("input[type='search'], input[placeholder*='搜索'], input[placeholder*='关键字']");
     const hasSearchResultsHeading = /搜索结果|共找到|条结果/.test(articleMeta);
 
@@ -484,6 +535,7 @@ export async function validateArticlePage(page: Page, expectedTitle: string): Pr
       heading,
       repeatedSeriesEntryCount,
       matchingSeriesLinkCount,
+      matchingSeriesAlternateLinkCount,
       longParagraphCount: longP.length,
       maxContentLength,
       dateLikeCount,

@@ -106,6 +106,7 @@ describe("isSeriesDirectoryShape", () => {
       heading: "VW001.001 习近平论坚持和发展中国特色社会主义 （2026年）2026-01-21",
       repeatedSeriesEntryCount: 12,
       matchingSeriesLinkCount: 8,
+      matchingSeriesAlternateLinkCount: 2,
       longParagraphCount: 0,
       maxContentLength: 980,
       dateLikeCount: 12,
@@ -118,6 +119,7 @@ describe("isSeriesDirectoryShape", () => {
       heading: "VW001.004 习近平论坚定理想信念 （2026年）2026-02-24",
       repeatedSeriesEntryCount: 3,
       matchingSeriesLinkCount: 2,
+      matchingSeriesAlternateLinkCount: 1,
       longParagraphCount: 0,
       maxContentLength: 1100,
       dateLikeCount: 10,
@@ -130,10 +132,24 @@ describe("isSeriesDirectoryShape", () => {
       heading: "VW001.001 习近平论坚持和发展中国特色社会主义 （2026年）2026-01-21",
       repeatedSeriesEntryCount: 1,
       matchingSeriesLinkCount: 1,
+      matchingSeriesAlternateLinkCount: 0,
       longParagraphCount: 4,
       maxContentLength: 2400,
       dateLikeCount: 1,
       listItemCount: 3,
     })).toBe(false);
+  });
+
+  test("rejects series directory when the current heading still has a separate matching entry link", () => {
+    expect(isSeriesDirectoryShape({
+      heading: "VW001.006 习近平论“五位一体”和“四个全面” （2026年）2026-02-24",
+      repeatedSeriesEntryCount: 2,
+      matchingSeriesLinkCount: 1,
+      matchingSeriesAlternateLinkCount: 1,
+      longParagraphCount: 0,
+      maxContentLength: 900,
+      dateLikeCount: 2,
+      listItemCount: 6,
+    })).toBe(true);
   });
 });
