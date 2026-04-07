@@ -1,4 +1,5 @@
 import type { Page } from "puppeteer-core";
+import readline from "node:readline";
 import type { IQuizConfig } from "../config";
 import { isLlmConfigured, solveQuizWithLlm } from "../llm";
 import {
@@ -22,19 +23,31 @@ import { delay } from "./timing";
 function waitForTerminalContinue(): { promise: Promise<"terminal">; cancel: () => void } {
   let settled = false;
   const stdin = process.stdin;
+  const stdout = process.stdout;
+  const rl = readline.createInterface({ input: stdin, output: stdout, terminal: Boolean(stdin.isTTY) });
 
   const cleanup = () => {
+    rl.removeListener("line", onLine);
     stdin.off("data", onData);
-    if (stdin.isTTY) {
-      stdin.pause();
-    }
+    rl.close();
+    stdin.pause();
   };
 
-  const onData = () => {
+  const finish = () => {
     if (settled) return;
     settled = true;
     cleanup();
     resolvePromise("terminal");
+  };
+
+  const onLine = () => {
+    finish();
+  };
+
+  const onData = (chunk: Buffer | string) => {
+    const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
+    if (!/[\r\n]/.test(text)) return;
+    finish();
   };
 
   let resolvePromise!: (value: "terminal") => void;
@@ -42,8 +55,9 @@ function waitForTerminalContinue(): { promise: Promise<"terminal">; cancel: () =
     resolvePromise = resolve;
   });
 
+  rl.on("line", onLine);
   stdin.resume();
-  stdin.once("data", onData);
+  stdin.on("data", onData);
 
   return {
     promise,
@@ -106,6 +120,12 @@ async function removeContinueOverlay(page: Page): Promise<void> {
   }).catch(() => null);
 }
 
+async function getContinuePages(page: Page): Promise<Page[]> {
+  const pages = await page.browser().pages().catch(() => [page]);
+  const xuexiPages = pages.filter((candidate) => /xuexi\.cn/i.test(candidate.url()));
+  return xuexiPages.length > 0 ? xuexiPages : [page];
+}
+
 async function waitForUserContinue(page: Page, message: string): Promise<void> {
   const token = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   console.log(message);
@@ -113,13 +133,18 @@ async function waitForUserContinue(page: Page, message: string): Promise<void> {
 
   const pageWaiter = (async (): Promise<"page"> => {
     while (true) {
-      await injectContinueOverlay(page, token, message).catch(() => null);
+      const pages = await getContinuePages(page);
+      await Promise.all(pages.map(async (candidate) => {
+        await injectContinueOverlay(candidate, token, message).catch(() => null);
+      }));
 
-      const clicked = await page.evaluate((expectedToken) => {
-        return (window as typeof window & { __aixuexiContinueToken?: string }).__aixuexiContinueToken === expectedToken;
-      }, token).catch(() => false);
+      const clickedPages = await Promise.all(pages.map(async (candidate) => {
+        return await candidate.evaluate((expectedToken) => {
+          return (window as typeof window & { __aixuexiContinueToken?: string }).__aixuexiContinueToken === expectedToken;
+        }, token).catch(() => false);
+      }));
 
-      if (clicked) {
+      if (clickedPages.some(Boolean)) {
         return "page";
       }
 
@@ -131,7 +156,10 @@ async function waitForUserContinue(page: Page, message: string): Promise<void> {
     terminalWaiter.cancel();
   });
 
-  await removeContinueOverlay(page);
+  const pages = await getContinuePages(page);
+  await Promise.all(pages.map(async (candidate) => {
+    await removeContinueOverlay(candidate);
+  }));
   if (continueFrom === "terminal") {
     console.log("已收到终端回车，继续执行。");
   }
@@ -145,7 +173,14 @@ async function handleLegacyManualQuiz(page: Page, score: number, max: number): P
 
   console.log(`\x07\n====== 智能提示 ======`);
   console.log(`目前每日答题得分为 ${score}/${max}。`);
-  console.log("请点击进入浏览器页面，手动完成【每日答题】后再告知程序继续。");
+  console.log("程序将自动打开【每日答题】页面，请你手动完成答题并提交。");
+  try {
+    await navigateToDailyQuiz(page, delay);
+  } catch {
+    console.log("[测验任务] 从积分页进入每日答题失败，回退直达每日答题页面。");
+    await page.goto("https://pc.xuexi.cn/points/exam-practice.html", { waitUntil: "networkidle2" });
+    await delay(1200, 2000);
+  }
   await waitForUserContinue(page, "答题完成后，请点击浏览器右下角“继续”按钮，或在终端按 Enter。");
   console.log("收到继续信号，恢复执行自动化任务...");
 }
