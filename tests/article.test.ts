@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { extractArticleTitle, isCandidateArticleUrl, isVideoDominatedArticleShape, looksLikeArticleTitle, normalizeArticleSeriesTitle, normalizeArticleUrl } from "../src/tasks/article_helpers";
+import { extractArticleTitle, isCandidateArticleUrl, isSeriesDirectoryShape, isVideoDominatedArticleShape, looksLikeArticleSeriesSectionTitle, looksLikeArticleTitle, normalizeArticleSeriesTitle, normalizeArticleUrl } from "../src/tasks/article_helpers";
 
 describe("isCandidateArticleUrl", () => {
   test("accepts real article-style urls", () => {
@@ -68,6 +68,16 @@ describe("normalizeArticleSeriesTitle", () => {
   });
 });
 
+describe("looksLikeArticleSeriesSectionTitle", () => {
+  test("treats 3-digit xi jinping wenhui titles as section entries", () => {
+    expect(looksLikeArticleSeriesSectionTitle("004习近平论坚定理想信念")).toBe(true);
+  });
+
+  test("does not treat VW article titles as section entries", () => {
+    expect(looksLikeArticleSeriesSectionTitle("VW001.004 习近平论坚定理想信念 （2026年）2026-02-24")).toBe(false);
+  });
+});
+
 describe("isVideoDominatedArticleShape", () => {
   test("rejects video-only article pages", () => {
     expect(isVideoDominatedArticleShape({
@@ -87,5 +97,59 @@ describe("isVideoDominatedArticleShape", () => {
       bodyTextLength: 1800,
       hasLargeVideoPlayer: true,
     })).toBe(false);
+  });
+});
+
+describe("isSeriesDirectoryShape", () => {
+  test("rejects series directory pages disguised as article detail", () => {
+    expect(isSeriesDirectoryShape({
+      heading: "VW001.001 习近平论坚持和发展中国特色社会主义 （2026年）2026-01-21",
+      repeatedSeriesEntryCount: 12,
+      matchingSeriesLinkCount: 8,
+      matchingSeriesAlternateLinkCount: 2,
+      longParagraphCount: 0,
+      maxContentLength: 980,
+      dateLikeCount: 12,
+      listItemCount: 18,
+    })).toBe(true);
+  });
+
+  test("rejects xuexi wenhui directory pages by dense dated list layout", () => {
+    expect(isSeriesDirectoryShape({
+      heading: "VW001.004 习近平论坚定理想信念 （2026年）2026-02-24",
+      repeatedSeriesEntryCount: 3,
+      matchingSeriesLinkCount: 2,
+      matchingSeriesAlternateLinkCount: 1,
+      longParagraphCount: 0,
+      maxContentLength: 1100,
+      dateLikeCount: 10,
+      listItemCount: 20,
+    })).toBe(true);
+  });
+
+  test("keeps real detail pages without repeated dated sibling entries", () => {
+    expect(isSeriesDirectoryShape({
+      heading: "VW001.001 习近平论坚持和发展中国特色社会主义 （2026年）2026-01-21",
+      repeatedSeriesEntryCount: 1,
+      matchingSeriesLinkCount: 1,
+      matchingSeriesAlternateLinkCount: 0,
+      longParagraphCount: 4,
+      maxContentLength: 2400,
+      dateLikeCount: 1,
+      listItemCount: 3,
+    })).toBe(false);
+  });
+
+  test("rejects series directory when the current heading still has a separate matching entry link", () => {
+    expect(isSeriesDirectoryShape({
+      heading: "VW001.006 习近平论“五位一体”和“四个全面” （2026年）2026-02-24",
+      repeatedSeriesEntryCount: 2,
+      matchingSeriesLinkCount: 1,
+      matchingSeriesAlternateLinkCount: 1,
+      longParagraphCount: 0,
+      maxContentLength: 900,
+      dateLikeCount: 2,
+      listItemCount: 6,
+    })).toBe(true);
   });
 });

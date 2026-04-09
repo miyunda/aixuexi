@@ -65,6 +65,36 @@ export function normalizeArticleSeriesTitle(rawText: string): string {
     .trim();
 }
 
+export function looksLikeArticleSeriesSectionTitle(text: string): boolean {
+  const compact = text.replace(/\s+/g, "");
+  return /^\d{3}习近平论/.test(compact);
+}
+
+export function isSeriesDirectoryShape(input: {
+  heading: string;
+  repeatedSeriesEntryCount: number;
+  matchingSeriesLinkCount: number;
+  matchingSeriesAlternateLinkCount?: number;
+  longParagraphCount: number;
+  maxContentLength: number;
+  dateLikeCount?: number;
+  listItemCount?: number;
+}): boolean {
+  const compactHeading = input.heading.replace(/\s+/g, "");
+  const headingLooksLikeSeriesEntry = /^VW\d+\.\d+/i.test(compactHeading);
+  return (
+    headingLooksLikeSeriesEntry &&
+    input.longParagraphCount < 2 &&
+    input.maxContentLength < 1400 &&
+    (
+      input.repeatedSeriesEntryCount >= 6 ||
+      input.matchingSeriesLinkCount >= 4 ||
+      ((input.matchingSeriesAlternateLinkCount || 0) >= 1 && input.longParagraphCount < 3) ||
+      ((input.dateLikeCount || 0) >= 4 && (input.listItemCount || 0) >= 8)
+    )
+  );
+}
+
 export function normalizeArticleUrl(rawUrl: string): string {
   try {
     const url = new URL(rawUrl);
@@ -194,13 +224,15 @@ export async function collectArticleCandidates(page: Page, seenTitles: Set<strin
       }, title);
       if (isSectionLike) continue;
 
+      const kind: "article" | "section" = looksLikeArticleSeriesSectionTitle(title) ? "section" : "article";
+
       seen.add(title);
       results.push({
         text: title,
         selector,
         index,
         source: "card",
-        kind: "article",
+        kind,
       });
     }
   }
@@ -279,6 +311,7 @@ export async function openArticleFromSectionPage(
 ): Promise<Page | null> {
   const originalUrl = page.url();
   const nestedHref = await page.evaluate((rawExpectedTitle) => {
+    const currentUrl = location.href;
     const normalize = (value: string | null | undefined) => (value || "").replace(/\s+/g, "").trim();
     const normalizeSeriesTitle = (value: string | null | undefined) => normalize(value)
       .replace(/^VW\d+\.\d+/i, "")
@@ -299,6 +332,25 @@ export async function openArticleFromSectionPage(
         const hasDate = /\d{4}-\d{2}-\d{2}/.test(rowText);
         const hasYearTag = /（\d{4}年/.test(text) || /（\d{4}年/.test(anchor.parentElement?.textContent || "");
         const inLeftColumn = rect.left < window.innerWidth * 0.7;
+        const exactSeriesEntry = /^VW\d+\.\d+/i.test(compact);
+        let score = 0;
+        if (exactSeriesEntry) score += 8;
+        if (hasDate) score += 4;
+        if (hasYearTag) score += 3;
+        if (normalizedTitle === expected) score += 4;
+        else if (normalizedTitle.startsWith(expected) || expected.startsWith(normalizedTitle)) score += 2;
+        try {
+          const hrefUrl = new URL(anchor.href, currentUrl);
+          const pathname = hrefUrl.pathname.toLowerCase();
+          if (hrefUrl.hostname === "article.xuexi.cn") score += 10;
+          if (pathname.includes("/detail/")) score += 8;
+          if (pathname.includes("lgpage/detail")) score += 8;
+          if (/\/articles\/.*\.html$/.test(pathname)) score += 6;
+          if (pathname.endsWith(".html")) score += 1;
+          if (hrefUrl.toString() === currentUrl) score -= 20;
+        } catch {
+          score -= 10;
+        }
         return {
           href: anchor.href,
           compact,
@@ -307,6 +359,7 @@ export async function openArticleFromSectionPage(
           hasYearTag,
           inLeftColumn,
           top: rect.top,
+          score,
         };
       })
       .filter((item) => {
@@ -315,7 +368,7 @@ export async function openArticleFromSectionPage(
         if (!item.normalizedTitle || !item.normalizedTitle.includes(expected)) return false;
         return item.hasDate || item.hasYearTag;
       })
-      .sort((a, b) => a.top - b.top);
+      .sort((a, b) => (b.score - a.score) || (a.top - b.top));
 
     return candidates[0]?.href || "";
   }, expectedTitle);
@@ -340,6 +393,38 @@ export async function validateArticlePage(page: Page, expectedTitle: string): Pr
       if (!/[\u4e00-\u9fa5A-Za-z]/.test(compact)) return false;
       if (/退出|登录|欢迎您|搜索结果|积分明细/.test(compact)) return false;
       return true;
+    };
+
+    const normalizeSeriesTitle = (value: string | null | undefined) => (value || "")
+      .replace(/\s+/g, "")
+      .replace(/^VW\d+\.\d+\s*/i, "")
+      .replace(/^\d{3}\s*/i, "")
+      .replace(/（\d{4}年.*?）/g, "")
+      .replace(/\d{4}-\d{2}-\d{2}/g, "")
+      .trim();
+    const isSeriesDirectory = (input: {
+      heading: string;
+      repeatedSeriesEntryCount: number;
+      matchingSeriesLinkCount: number;
+      matchingSeriesAlternateLinkCount: number;
+      longParagraphCount: number;
+      maxContentLength: number;
+      dateLikeCount: number;
+      listItemCount: number;
+    }) => {
+      const compactHeading = input.heading.replace(/\s+/g, "");
+      const headingLooksLikeSeriesEntry = /^VW\d+\.\d+/i.test(compactHeading);
+      return (
+        headingLooksLikeSeriesEntry &&
+        input.longParagraphCount < 2 &&
+        input.maxContentLength < 1400 &&
+        (
+          input.repeatedSeriesEntryCount >= 6 ||
+          input.matchingSeriesLinkCount >= 4 ||
+          (input.matchingSeriesAlternateLinkCount >= 1 && input.longParagraphCount < 3) ||
+          (input.dateLikeCount >= 4 && input.listItemCount >= 8)
+        )
+      );
     };
 
     const currentUrl = location.href.toLowerCase();
@@ -372,9 +457,60 @@ export async function validateArticlePage(page: Page, expectedTitle: string): Pr
     const dateLikeCount = (document.body.innerText.match(/\d{4}-\d{2}-\d{2}/g) || []).length;
     const anchorCount = document.querySelectorAll("a").length;
     const listItemCount = document.querySelectorAll("li, .item, .text-link-item, .grid-cell, [class*='item']").length;
+    const textLinkItemTitleCount = document.querySelectorAll(".text-link-item-title").length;
     const repeatedSeriesEntryCount = Array.from(document.querySelectorAll("a[href], li, tr"))
       .map((node) => (node.textContent || "").replace(/\s+/g, " ").trim())
       .filter((text) => /^VW\d+\.\d+/.test(text) || /\d{4}-\d{2}-\d{2}/.test(text))
+      .length;
+    const normalizedHeadingSeries = normalizeSeriesTitle(heading);
+    const matchingSeriesLinkCount = Array.from(document.querySelectorAll<HTMLAnchorElement>("a[href]"))
+      .map((anchor) => {
+        const text = (anchor.textContent || "").replace(/\s+/g, " ").trim();
+        const normalizedTitle = normalizeSeriesTitle(text);
+        const rowText = (anchor.parentElement?.textContent || anchor.closest("li, tr, .item, .text-link-item, .grid-cell")?.textContent || "")
+          .replace(/\s+/g, " ")
+          .trim();
+        const rect = anchor.getBoundingClientRect();
+        const inLeftColumn = rect.left < window.innerWidth * 0.7;
+        return {
+          normalizedTitle,
+          inLeftColumn,
+          hasDate: /\d{4}-\d{2}-\d{2}/.test(rowText),
+          hasYearTag: /（\d{4}年/.test(text) || /（\d{4}年/.test(rowText),
+        };
+      })
+      .filter((item) => {
+        if (!normalizedHeadingSeries || !item.normalizedTitle) return false;
+        if (!item.inLeftColumn) return false;
+        if (!item.normalizedTitle.includes(normalizedHeadingSeries)) return false;
+        return item.hasDate || item.hasYearTag;
+      })
+      .length;
+    const matchingSeriesAlternateLinkCount = Array.from(document.querySelectorAll<HTMLAnchorElement>("a[href]"))
+      .map((anchor) => {
+        const text = (anchor.textContent || "").replace(/\s+/g, " ").trim();
+        const normalizedTitle = normalizeSeriesTitle(text);
+        const rowText = (anchor.parentElement?.textContent || anchor.closest("li, tr, .item, .text-link-item, .grid-cell")?.textContent || "")
+          .replace(/\s+/g, " ")
+          .trim();
+        const rect = anchor.getBoundingClientRect();
+        const inLeftColumn = rect.left < window.innerWidth * 0.7;
+        const href = anchor.href || "";
+        return {
+          href,
+          normalizedTitle,
+          inLeftColumn,
+          hasDate: /\d{4}-\d{2}-\d{2}/.test(rowText),
+          hasYearTag: /（\d{4}年/.test(text) || /（\d{4}年/.test(rowText),
+        };
+      })
+      .filter((item) => {
+        if (!normalizedHeadingSeries || !item.normalizedTitle) return false;
+        if (!item.inLeftColumn) return false;
+        if (!item.href || item.href === location.href) return false;
+        if (item.normalizedTitle !== normalizedHeadingSeries) return false;
+        return item.hasDate || item.hasYearTag;
+      })
       .length;
     const searchInput = document.querySelector("input[type='search'], input[placeholder*='搜索'], input[placeholder*='关键字']");
     const hasSearchResultsHeading = /搜索结果|共找到|条结果/.test(articleMeta);
@@ -390,11 +526,26 @@ export async function validateArticlePage(page: Page, expectedTitle: string): Pr
     if ((searchInput || hasSearchResultsHeading) && maxContentLength < 600 && longP.length < 2) {
       return { ok: false, reason: "页面更像搜索结果页" } as const;
     }
+    if (textLinkItemTitleCount >= 8 && longP.length < 2 && !hasPublishMeta) {
+      return { ok: false, reason: "页面更像文本列表页" } as const;
+    }
     if (dateLikeCount >= 6 && anchorCount >= 20 && longP.length < 2 && maxContentLength < 800) {
       return { ok: false, reason: "页面更像文章列表页" } as const;
     }
     if (repeatedSeriesEntryCount >= 6 && longP.length < 2 && maxContentLength < 900) {
       return { ok: false, reason: "页面更像专题目录页" } as const;
+    }
+    if (isSeriesDirectory({
+      heading,
+      repeatedSeriesEntryCount,
+      matchingSeriesLinkCount,
+      matchingSeriesAlternateLinkCount,
+      longParagraphCount: longP.length,
+      maxContentLength,
+      dateLikeCount,
+      listItemCount,
+    })) {
+      return { ok: false, reason: "页面更像系列目录页" } as const;
     }
     if (listItemCount >= 12 && longP.length < 2 && maxContentLength < 800) {
       return { ok: false, reason: "页面以列表聚合为主" } as const;

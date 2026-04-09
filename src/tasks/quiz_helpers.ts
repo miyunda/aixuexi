@@ -1,6 +1,6 @@
 import type { Page } from "puppeteer-core";
 
-export type QuizQuestionType = "single" | "multiple" | "blank" | "unknown";
+export type QuizQuestionType = "single" | "multiple" | "single_blank" | "multi_blank" | "unknown";
 
 export interface QuizQuestionSnapshot {
   stem: string;
@@ -10,6 +10,62 @@ export interface QuizQuestionSnapshot {
   hasVideo: boolean;
   currentIndex: number;
   totalQuestions: number;
+}
+
+export function isBlankQuestionType(questionType: QuizQuestionType): boolean {
+  return questionType === "single_blank" || questionType === "multi_blank";
+}
+
+interface VisualBlankSlot {
+  text: string;
+  x: number;
+  y: number;
+}
+
+export function resolveQuestionTypeFromSnapshot(params: {
+  parsedQuestionType: QuizQuestionType;
+  parsedOptionsCount: number;
+  selectorOptionsCount: number;
+  inputBlankCount: number;
+  visualBlankCount: number;
+}): QuizQuestionType {
+  const {
+    parsedQuestionType,
+    parsedOptionsCount,
+    selectorOptionsCount,
+    inputBlankCount,
+    visualBlankCount,
+  } = params;
+
+  const optionCount = Math.max(parsedOptionsCount, selectorOptionsCount);
+  const hasChoiceSignals =
+    optionCount >= 2 || parsedQuestionType === "single" || parsedQuestionType === "multiple";
+
+  if (hasChoiceSignals) {
+    if (parsedQuestionType === "single" || parsedQuestionType === "multiple") {
+      return parsedQuestionType;
+    }
+    return optionCount > 2 ? "multiple" : "single";
+  }
+
+  if (inputBlankCount > 0 || isBlankQuestionType(parsedQuestionType) || visualBlankCount > 0) {
+    const blankCount = Math.max(inputBlankCount, visualBlankCount);
+    return blankCount <= 1 ? "single_blank" : "multi_blank";
+  }
+
+  return parsedQuestionType;
+}
+
+export function hasAdvancedToDifferentQuestion(
+  previousSnapshot: Pick<QuizQuestionSnapshot, "stem" | "currentIndex">,
+  nextSnapshot: Pick<QuizQuestionSnapshot, "stem" | "currentIndex">
+): boolean {
+  const advancedByIndex =
+    nextSnapshot.currentIndex > 0 &&
+    previousSnapshot.currentIndex > 0 &&
+    nextSnapshot.currentIndex > previousSnapshot.currentIndex;
+  const advancedByStem = Boolean(nextSnapshot.stem && nextSnapshot.stem !== previousSnapshot.stem);
+  return advancedByIndex || advancedByStem;
 }
 
 interface ParsedQuestionText {
@@ -145,6 +201,82 @@ function inferSingleBlankByDiff(stem: string, hint: string): string {
   return inserted;
 }
 
+function inferSingleBlankByLcs(stem: string, hint: string): string {
+  const a = normalizeQuizText(stem).replace(/\s+/g, "");
+  const b = normalizeQuizText(hint).replace(/\s+/g, "");
+  if (!a || !b || a === b) return "";
+
+  const dp: number[][] = Array.from({ length: a.length + 1 }, () => Array<number>(b.length + 1).fill(0));
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      if (a[i - 1] === b[j - 1]) {
+        dp[i][j] = dp[i - 1][j - 1] + 1;
+      } else {
+        dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1]);
+      }
+    }
+  }
+
+  const matchedHintIndexes = new Set<number>();
+  let i = a.length;
+  let j = b.length;
+  while (i > 0 && j > 0) {
+    if (a[i - 1] === b[j - 1]) {
+      matchedHintIndexes.add(j - 1);
+      i--;
+      j--;
+    } else if (dp[i - 1][j] >= dp[i][j - 1]) {
+      i--;
+    } else {
+      j--;
+    }
+  }
+
+  const fragments: string[] = [];
+  let current = "";
+  for (let index = 0; index < b.length; index++) {
+    if (matchedHintIndexes.has(index)) {
+      if (current) {
+        fragments.push(current);
+        current = "";
+      }
+    } else {
+      current += b[index];
+    }
+  }
+  if (current) {
+    fragments.push(current);
+  }
+
+  const candidates = fragments
+    .map((item) => trimAnswerFragment(item))
+    .filter((item) =>
+      item.length > 0 &&
+      item.length <= 16 &&
+      !/[，。；：！？]/.test(item) &&
+      !/^\d{4}年/.test(item) &&
+      !a.includes(item)
+    );
+
+  if (candidates.length === 0) return "";
+  return Array.from(new Set(candidates)).sort((left, right) => left.length - right.length)[0] || "";
+}
+
+export function pickSingleBlankFromHighlights(stem: string, hintText: string, highlighted: string[]): string {
+  const normalizedHint = normalizeQuizText(hintText).replace(/\s+/g, "");
+  const candidates = Array.from(new Set(
+    highlighted
+      .map((item) => normalizeQuizText(item).replace(/[“"《》”]/g, "").replace(/\s+/g, ""))
+      .filter((item) => item.length > 0 && item.length <= 16 && !/[，。；：]/.test(item))
+  ));
+  if (!normalizedHint || candidates.length === 0) return "";
+  if (candidates.length === 1) return candidates[0] || "";
+
+  const shortestLength = Math.min(...candidates.map((item) => item.length));
+  const narrowed = candidates.filter((item) => item.length <= shortestLength + 1);
+  return narrowed.sort((a, b) => normalizedHint.lastIndexOf(b) - normalizedHint.lastIndexOf(a))[0] || candidates[0] || "";
+}
+
 export function tokenizeBlankAnswerByCandidates(answer: string, candidates: string[]): string[] {
   const target = normalizeQuizText(answer).replace(/\s+/g, "");
   const parts = candidates
@@ -168,6 +300,24 @@ export function tokenizeBlankAnswerByCandidates(answer: string, candidates: stri
   return out;
 }
 
+export function sortVisualSlots<T extends { x: number; y: number }>(slots: T[]): T[] {
+  const rowThreshold = 12;
+  return [...slots].sort((a, b) => {
+    if (Math.abs(a.y - b.y) <= rowThreshold) {
+      return a.x - b.x;
+    }
+    return a.y - b.y;
+  });
+}
+
+function normalizeBlankSlotText(text: string): string {
+  return normalizeQuizText(text).replace(/\s+/g, "");
+}
+
+function isBlankSlotEmpty(text: string): boolean {
+  return !text || /^[_\u3000\s（）()]+$/.test(text);
+}
+
 export function deriveOrderedBlankSuggestions(stem: string, hintText: string, blankCount: number): string[] {
   const normalizedStem = normalizeQuizText(stem);
   const normalizedHint = normalizeQuizText(hintText);
@@ -176,8 +326,8 @@ export function deriveOrderedBlankSuggestions(stem: string, hintText: string, bl
   }
 
   const parts = normalizedStem.split(BLANK_PATTERN).map((part) => normalizeQuizText(part));
-  if (blankCount === 1 && parts.length < 2) {
-    const diffAnswer = inferSingleBlankByDiff(normalizedStem, normalizedHint);
+  if (parts.length < 2) {
+    const diffAnswer = inferSingleBlankByDiff(normalizedStem, normalizedHint) || inferSingleBlankByLcs(normalizedStem, normalizedHint);
     if (diffAnswer) {
       return [diffAnswer];
     }
@@ -244,7 +394,7 @@ export function parseQuestionFromRawText(rawText: string): ParsedQuestionText {
   let questionType: QuizQuestionType = "unknown";
   if (normalized.includes("多选题")) questionType = "multiple";
   else if (normalized.includes("单选题")) questionType = "single";
-  else if (normalized.includes("填空题")) questionType = "blank";
+  else if (normalized.includes("填空题")) questionType = "single_blank";
 
   const lineOptions = lines.filter((line) => /^[A-D][.．、]\s*/.test(line));
   const regexOptions = Array.from(normalized.matchAll(/([A-D])[.．、]\s*([\s\S]*?)(?=[A-D][.．、]\s*|出题：|来源：|查看提示|确\s*定|$)/g))
@@ -306,6 +456,17 @@ export function matchSuggestedOptions(optionTexts: string[], suggestions: string
       (labelOption !== "" && labeledSuggestions.includes(labelOption))
     );
   });
+}
+
+function dedupeTexts(texts: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const text of texts.map((item) => normalizeQuizText(item)).filter(Boolean)) {
+    if (seen.has(text)) continue;
+    seen.add(text);
+    out.push(text);
+  }
+  return out;
 }
 
 export async function navigateToDailyQuiz(page: Page, delay: (min: number, max: number) => Promise<void>): Promise<void> {
@@ -448,6 +609,12 @@ export async function readQuizQuestionSnapshot(page: Page): Promise<QuizQuestion
   const snapshot = await page.evaluate(() => {
     const rawText = (document.body?.innerText || "").trim();
     const normalize = (value: string | null | undefined) => (value || "").replace(/\s+/g, " ").trim();
+    const isVisible = (node: HTMLElement) => {
+      const rect = node.getBoundingClientRect();
+      if (rect.width < 8 || rect.height < 8) return false;
+      const style = getComputedStyle(node);
+      return style.display !== "none" && style.visibility !== "hidden";
+    };
     const selectorOptions = Array.from(
       document.querySelectorAll<HTMLElement>(".q-answer, .q-answer-text-box, .q-answers .choosable, [class*='q-answer']")
     )
@@ -461,11 +628,38 @@ export async function readQuizQuestionSnapshot(page: Page): Promise<QuizQuestion
       normalize(document.querySelector<HTMLElement>(".pager, .q-header, [class*='pager'], [class*='header']")?.textContent) ||
       normalize(document.body?.innerText);
     const progressMatch = progressText.match(/(\d+)\s*\/\s*(\d+)/);
-    const blankCount = document.querySelectorAll("input[type='text'], textarea, [contenteditable='true']").length;
+    const inputBlankCount = document.querySelectorAll("input[type='text'], textarea, [contenteditable='true']").length;
+    const root = (document.querySelector(".q-body, .question, .q-question, .detail-body") as HTMLElement | null) || document.body;
+    const visualBlankCount = Array.from(root.querySelectorAll<HTMLElement>("input, textarea, [contenteditable='true'], span, div, i, b, em"))
+      .filter((node) => {
+        if (!isVisible(node)) return false;
+        const cls = (node.className || "").toLowerCase();
+        const text = normalize(node.textContent);
+        const rect = node.getBoundingClientRect();
+        const style = getComputedStyle(node);
+        const inHintPopover = Boolean(node.closest(".ant-popover, [class*='popover'], [class*='tooltip'], .q-help"));
+        const inWordBank = Boolean(node.closest(".q-tag-wrap, [class*='tag-wrap'], .q-answers"));
+        if (inHintPopover || inWordBank) return false;
+        const hasSlotClass = /(blank|input|slot|answer|fill)/.test(cls);
+        const emptyLike = !text || /^[_\u3000\s（）()]+$/.test(text);
+        if (hasSlotClass) {
+          return emptyLike || text.length <= 12;
+        }
+        const boxLike =
+          rect.width >= 12 &&
+          rect.width <= 72 &&
+          rect.height >= 16 &&
+          rect.height <= 64 &&
+          (style.borderBottomStyle !== "none" || style.borderStyle !== "none");
+        return boxLike && emptyLike;
+      }).length;
+    const blankCount = Math.max(inputBlankCount, visualBlankCount);
     const hasVideo = !!document.querySelector("video, .prism-player, .video-js, [class*='video']");
     return {
       rawText,
       blankCount,
+      inputBlankCount,
+      visualBlankCount,
       hasVideo,
       selectorOptions,
       selectorStem,
@@ -475,7 +669,13 @@ export async function readQuizQuestionSnapshot(page: Page): Promise<QuizQuestion
   });
 
   const parsed = parseQuestionFromRawText(snapshot.rawText);
-  const questionType = snapshot.blankCount > 0 ? "blank" : parsed.questionType;
+  const questionType = resolveQuestionTypeFromSnapshot({
+    parsedQuestionType: parsed.questionType,
+    parsedOptionsCount: parsed.options.length,
+    selectorOptionsCount: snapshot.selectorOptions.length,
+    inputBlankCount: snapshot.inputBlankCount,
+    visualBlankCount: snapshot.visualBlankCount,
+  });
   const selectorOptions = snapshot.selectorOptions
     .map(cleanOptionText)
     .filter((text) => text.length > 2 && isSingleChoiceOption(text));
@@ -603,11 +803,12 @@ function isLikelyHighlightColor(color: string): boolean {
 export async function extractHintHighlights(page: Page): Promise<string[]> {
   const items = await page.evaluate(() => {
     const normalize = (value: string | null | undefined) => (value || "").replace(/\s+/g, " ").trim();
-    const nodes = Array.from(document.querySelectorAll<HTMLElement>(".ant-popover-inner-content *"));
+    const nodes = Array.from(document.querySelectorAll<HTMLElement>(".ant-popover-inner-content *, .ant-popover *"));
     const out: string[] = [];
     for (const node of nodes) {
       const text = normalize(node.textContent);
       if (!text || text.length > 20) continue;
+      if (node.children.length > 0) continue;
       const style = getComputedStyle(node);
       const color = style.color || "";
       const weight = Number(style.fontWeight || "400");
@@ -634,37 +835,109 @@ async function readOptionSelectionState(page: Page, expectedText: string): Promi
   return await page.evaluate((targetText) => {
     const normalize = (value: string | null | undefined) => (value || "").replace(/\s+/g, " ").trim();
     const nodes = Array.from(document.querySelectorAll<HTMLElement>(".q-answer.choosable, .q-answer"));
-    const node = nodes.find((item) => normalize(item.textContent) === targetText);
-    if (!node) return false;
+    const matchingNodes = nodes.filter((item) => normalize(item.textContent) === targetText);
+    if (matchingNodes.length === 0) return false;
 
-    const style = getComputedStyle(node);
-    const classText = (node.className || "").toLowerCase();
-    const ariaChecked = node.getAttribute("aria-checked");
-    const ariaSelected = node.getAttribute("aria-selected");
-    const borderColor = style.borderColor || "";
-    const textColor = style.color || "";
-    const backgroundColor = style.backgroundColor || "";
-    const boxShadow = style.boxShadow || "";
+    const isSelectedLike = (element: HTMLElement | null) => {
+      if (!element) return false;
+      const style = getComputedStyle(element);
+      const classText = (element.className || "").toLowerCase();
+      const ariaChecked = element.getAttribute("aria-checked");
+      const ariaSelected = element.getAttribute("aria-selected");
+      const borderColor = style.borderColor || "";
+      const textColor = style.color || "";
+      const backgroundColor = style.backgroundColor || "";
+      const boxShadow = style.boxShadow || "";
+      const highlightedBorder =
+        /rgb\(210,\s*65,\s*50\)|rgb\(217,\s*83,\s*79\)|rgb\(255,\s*77,\s*79\)|rgb\(230,\s*95,\s*64\)|rgb\(186,\s*158,\s*131\)/i.test(borderColor);
+      const highlightedText =
+        /rgb\(210,\s*65,\s*50\)|rgb\(217,\s*83,\s*79\)|rgb\(255,\s*77,\s*79\)|rgb\(230,\s*95,\s*64\)|rgb\(186,\s*158,\s*131\)/i.test(textColor);
+      const highlightedBackground =
+        /rgb\(255,\s*245,\s*245\)|rgb\(255,\s*240,\s*240\)|rgb\(255,\s*237,\s*237\)|rgb\(255,\s*250,\s*250\)/i.test(backgroundColor);
+      const highlightedShadow =
+        /rgb\(210,\s*65,\s*50\)|rgb\(217,\s*83,\s*79\)|rgb\(255,\s*77,\s*79\)|rgb\(230,\s*95,\s*64\)|rgb\(186,\s*158,\s*131\)/i.test(boxShadow);
 
-    const highlightedBorder =
-      /rgb\(210,\s*65,\s*50\)|rgb\(217,\s*83,\s*79\)|rgb\(255,\s*77,\s*79\)|rgb\(230,\s*95,\s*64\)/i.test(borderColor);
-    const highlightedText =
-      /rgb\(210,\s*65,\s*50\)|rgb\(217,\s*83,\s*79\)|rgb\(255,\s*77,\s*79\)|rgb\(230,\s*95,\s*64\)/i.test(textColor);
-    const highlightedBackground =
-      /rgb\(255,\s*245,\s*245\)|rgb\(255,\s*240,\s*240\)|rgb\(255,\s*237,\s*237\)|rgb\(255,\s*250,\s*250\)/i.test(backgroundColor);
-    const highlightedShadow =
-      /rgb\(210,\s*65,\s*50\)|rgb\(217,\s*83,\s*79\)|rgb\(255,\s*77,\s*79\)|rgb\(230,\s*95,\s*64\)/i.test(boxShadow);
+      return (
+        ariaChecked === "true" ||
+        ariaSelected === "true" ||
+        /(checked|selected|active|current|chosen)/.test(classText) ||
+        highlightedBorder ||
+        highlightedText ||
+        highlightedBackground ||
+        highlightedShadow
+      );
+    };
 
-    return (
-      ariaChecked === "true" ||
-      ariaSelected === "true" ||
-      /(checked|selected|active|current)/.test(classText) ||
-      highlightedBorder ||
-      highlightedText ||
-      highlightedBackground ||
-      highlightedShadow
-    );
+    return matchingNodes.some((node) => {
+      if (isSelectedLike(node)) return true;
+
+      const input = node.querySelector<HTMLInputElement>("input[type='radio'], input[type='checkbox']");
+      if (input?.checked) return true;
+
+      const descendants = Array.from(node.querySelectorAll<HTMLElement>("input, label, span, div, i"));
+      if (descendants.some((item) => {
+        if (item instanceof HTMLInputElement && item.checked) return true;
+        return isSelectedLike(item);
+      })) {
+        return true;
+      }
+
+      const parent = node.parentElement;
+      const grandParent = parent?.parentElement || null;
+      return isSelectedLike(parent) || isSelectedLike(grandParent);
+    });
   }, expectedText);
+}
+
+async function forceOptionSelection(
+  node: {
+    boundingBox: () => Promise<{ x: number; y: number; width: number; height: number; } | null>;
+    evaluate: <T>(pageFunction: (element: Element) => T | Promise<T>) => Promise<T>;
+  }
+): Promise<void> {
+  await node.evaluate((element) => {
+    const target = element as HTMLElement;
+    const clickable =
+      target.closest("label, button, [role='radio'], [role='checkbox'], .q-answer, .choosable") as HTMLElement | null;
+    const primary = clickable || target;
+    primary.click();
+
+    const nested =
+      primary.querySelector<HTMLElement>("input, label, button, [role='radio'], [role='checkbox'], span, i") ||
+      target.querySelector<HTMLElement>("input, label, button, [role='radio'], [role='checkbox'], span, i");
+    nested?.click();
+
+    const input = (nested instanceof HTMLInputElement ? nested : primary.querySelector<HTMLInputElement>("input")) || null;
+    if (input) {
+      input.click();
+      input.checked = true;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+  }).catch(() => null);
+}
+
+async function findOptionNodeByText(
+  page: Page,
+  expectedText: string
+): Promise<{
+  boundingBox: () => Promise<{ x: number; y: number; width: number; height: number; } | null>;
+  evaluate: <T>(pageFunction: (element: Element) => T | Promise<T>) => Promise<T>;
+} | null> {
+  const optionNodes = await page.$$(".q-answer.choosable, .q-answer");
+  let fallback: typeof optionNodes[number] | null = null;
+
+  for (const node of optionNodes) {
+    const text = await page.evaluate((el) => (el.textContent || "").replace(/\s+/g, " ").trim(), node).catch(() => "");
+    if (normalizeQuizText(text) !== expectedText) continue;
+    fallback = fallback || node;
+    const box = await node.boundingBox().catch(() => null);
+    if (box && box.width > 0 && box.height > 0) {
+      return node;
+    }
+  }
+
+  return fallback;
 }
 
 export async function applySuggestedAnswers(
@@ -673,29 +946,33 @@ export async function applySuggestedAnswers(
   suggestions: string[],
   delay: (min: number, max: number) => Promise<void>
 ): Promise<string[]> {
-  if (snapshot.questionType === "blank" || suggestions.length === 0) {
+  if (isBlankQuestionType(snapshot.questionType) || suggestions.length === 0) {
     return [];
   }
 
-  const matchedTexts = matchSuggestedOptions(snapshot.options, suggestions);
-  const optionNodes = await page.$$(".q-answer.choosable, .q-answer");
+  const matchedTexts = dedupeTexts(matchSuggestedOptions(snapshot.options, suggestions));
   const applied: string[] = [];
 
-  for (const node of optionNodes) {
-    const text = await page.evaluate((el) => (el.textContent || "").replace(/\s+/g, " ").trim(), node);
-    if (!matchedTexts.includes(text)) continue;
+  for (const text of matchedTexts) {
     const alreadySelected = await readOptionSelectionState(page, text).catch(() => false);
     if (alreadySelected) {
       applied.push(text);
       continue;
     }
 
+    const node = await findOptionNodeByText(page, text);
+    if (!node) continue;
+
     let selected = false;
     for (let attempt = 0; attempt < 3; attempt++) {
-      const clicked = await humanClickElement(page, node, delay).catch(() => false);
-      if (!clicked) continue;
+      await humanClickElement(page, node, delay).catch(() => false);
       await humanPause(delay, 220 + attempt * 80, 520 + attempt * 120);
       selected = await readOptionSelectionState(page, text).catch(() => false);
+      if (!selected) {
+        await forceOptionSelection(node);
+        await humanPause(delay, 120, 260);
+        selected = await readOptionSelectionState(page, text).catch(() => false);
+      }
       if (selected) break;
     }
 
@@ -726,34 +1003,83 @@ export async function applyBlankAnswers(
 
   // Strategy 1: word-bank blank questions (click tokens to fill)
   // We only treat this as success when blank-slot state actually changes.
-  const candidateTokens = await page.evaluate(() => {
+  const blankTokenSelector = [
+    ".q-tag-wrap .q-tag",
+    ".q-tag-wrap .tag",
+    ".q-tag-wrap button",
+    ".q-tag-wrap span",
+    ".q-tag-wrap div",
+    "[class*='tag-wrap'] .q-tag",
+    "[class*='tag-wrap'] .tag",
+    ".q-answers .fill-answer",
+    ".fill-answer.fill-answer-click",
+    ".fill-answer",
+    ".q-answers .q-answer.choosable",
+    ".q-answers .q-answer",
+    ".q-answer.choosable",
+  ].join(", ");
+
+  const candidateTokens = await page.evaluate((selector) => {
     const normalize = (value: string | null | undefined) => (value || "").replace(/\s+/g, " ").trim();
-    const nodes = Array.from(document.querySelectorAll<HTMLElement>(
-      [
-        ".q-tag-wrap .q-tag",
-        ".q-tag-wrap .tag",
-        ".q-tag-wrap button",
-        ".q-tag-wrap span",
-        ".q-tag-wrap div",
-        "[class*='tag-wrap'] .q-tag",
-        "[class*='tag-wrap'] .tag",
-        ".q-answers .fill-answer",
-        ".fill-answer.fill-answer-click",
-        ".fill-answer",
-        ".q-answers .q-answer.choosable",
-        ".q-answers .q-answer",
-        ".q-answer.choosable",
-      ].join(", ")
-    ));
+    const nodes = Array.from(document.querySelectorAll<HTMLElement>(selector));
     const values = nodes
       .map((node) => normalize(node.textContent))
       .filter((text) => text.length > 0 && text.length <= 20 && !/^[A-D][.．、]/.test(text));
     return Array.from(new Set(values));
-  });
+  }, blankTokenSelector);
 
   if (candidateTokens.length > 0) {
-    const collectBlankSlots = () =>
-      page.evaluate(() => {
+    const triggerBlankToken = async (tokenText: string): Promise<boolean> => {
+      const domClicked = await page.evaluate(({ selector, expected }) => {
+        const normalize = (value: string | null | undefined) => (value || "").replace(/\s+/g, " ").trim();
+        const isVisible = (el: HTMLElement) => {
+          const rect = el.getBoundingClientRect();
+          if (rect.width < 6 || rect.height < 6) return false;
+          const style = getComputedStyle(el);
+          return style.display !== "none" && style.visibility !== "hidden";
+        };
+        const fireMouse = (target: HTMLElement, type: string) => {
+          target.dispatchEvent(new MouseEvent(type, {
+            view: window,
+            bubbles: true,
+            cancelable: true,
+            composed: true,
+          }));
+        };
+        const nodes = Array.from(document.querySelectorAll<HTMLElement>(selector));
+        const node = nodes.find((item) => normalize(item.textContent) === expected && isVisible(item));
+        if (!node) return false;
+        node.scrollIntoView({ behavior: "instant", block: "center", inline: "center" });
+        const clickable = node.closest("button, a, li, [role='button'], .q-tag, .tag, .fill-answer, .q-answer") as HTMLElement | null;
+        const target = clickable || node;
+        fireMouse(target, "mousedown");
+        fireMouse(target, "mouseup");
+        fireMouse(target, "click");
+        return true;
+      }, { selector: blankTokenSelector, expected: tokenText }).catch(() => false);
+
+      if (domClicked) {
+        await delay(140, 320);
+        return true;
+      }
+
+      const tokenPoint = await findTokenPoint(tokenText);
+      if (tokenPoint) {
+        await humanClickPoint(page, tokenPoint.x, tokenPoint.y, delay).catch(() => null);
+        await delay(140, 320);
+        return true;
+      }
+
+      return false;
+    };
+
+    const collectBlankSlots = async (): Promise<{
+      slots: VisualBlankSlot[];
+      texts: string[];
+      emptyCount: number;
+      nonEmptyCount: number;
+    }> => {
+      const slots = await page.evaluate(() => {
         const normalize = (value: string | null | undefined) => (value || "").replace(/\s+/g, " ").trim();
         const isVisible = (node: HTMLElement) => {
           const rect = node.getBoundingClientRect();
@@ -770,143 +1096,128 @@ export async function applyBlankAnswers(
           const rect = node.getBoundingClientRect();
           const style = getComputedStyle(node);
           const inHintPopover = Boolean(node.closest(".ant-popover, [class*='popover'], [class*='tooltip'], .q-help"));
-          if (inHintPopover) return false;
+          const inWordBank = Boolean(node.closest(".q-tag-wrap, [class*='tag-wrap'], .q-answers"));
+          if (inHintPopover || inWordBank) return false;
           const hasSlotClass = /(blank|input|slot|answer|fill)/.test(cls);
           const boxLike =
-            rect.width >= 16 &&
-            rect.width <= 52 &&
+            rect.width >= 12 &&
+            rect.width <= 160 &&
             rect.height >= 16 &&
-            rect.height <= 56 &&
-            (style.borderStyle !== "none" || style.backgroundColor !== "rgba(0, 0, 0, 0)");
+            rect.height <= 64 &&
+            (style.borderBottomStyle !== "none" || style.borderStyle !== "none" || style.backgroundColor !== "rgba(0, 0, 0, 0)");
           const emptyLike = !text || /^[_\u3000\s（）()]+$/.test(text);
-          return hasSlotClass || (boxLike && (emptyLike || text.length <= 4));
+          return hasSlotClass || (boxLike && (emptyLike || text.length <= 12));
         });
 
-        const texts = slots.map((node) => normalize(node.textContent));
-        const emptyCount = texts.filter((text) => !text || /^[_\u3000\s（）()]+$/.test(text)).length;
-        return {
-          texts,
-          emptyCount,
-          nonEmptyCount: texts.length - emptyCount,
-        };
+        return slots.map((node) => {
+          const rect = node.getBoundingClientRect();
+          return {
+            text: normalize(node.textContent),
+            x: rect.left + rect.width / 2,
+            y: rect.top + rect.height / 2,
+          };
+        });
       });
+      const orderedSlots = sortVisualSlots(slots);
+      const texts = orderedSlots.map((slot) => slot.text);
+      const emptyCount = texts.filter((text) => isBlankSlotEmpty(text)).length;
+      return {
+        slots: orderedSlots,
+        texts,
+        emptyCount,
+        nonEmptyCount: texts.length - emptyCount,
+      };
+    };
+
+    const findTokenPoint = async (expected: string) =>
+      page.evaluate(({ selector, tokenText }) => {
+        const normalize = (value: string | null | undefined) => (value || "").replace(/\s+/g, " ").trim();
+        const isVisible = (el: HTMLElement) => {
+          const rect = el.getBoundingClientRect();
+          if (rect.width < 6 || rect.height < 6) return false;
+          const style = getComputedStyle(el);
+          return style.display !== "none" && style.visibility !== "hidden";
+        };
+        const nodes = Array.from(document.querySelectorAll<HTMLElement>(selector));
+        const node = nodes.find((item) => normalize(item.textContent) === tokenText && isVisible(item));
+        if (!node) return null;
+        node.scrollIntoView({ behavior: "smooth", block: "center" });
+        const clickable = node.closest("button, a, li, [role='button'], .q-tag, .tag, .fill-answer") as HTMLElement | null;
+        const target = (clickable || node) as HTMLElement;
+        const rect = target.getBoundingClientRect();
+        return {
+          x: rect.left + rect.width / 2,
+          y: rect.top + rect.height / 2,
+        };
+      }, { selector: blankTokenSelector, tokenText: expected });
 
     const beforeState = await collectBlankSlots();
-
-    const clickedTokens: string[] = [];
+    const appliedTokens: string[] = [];
     for (const suggestion of suggestions) {
       const tokenSeq = tokenizeBlankAnswerByCandidates(suggestion, candidateTokens);
       if (tokenSeq.length === 0) continue;
+
       for (const token of tokenSeq) {
-        const slot = await page.evaluate(() => {
-          const normalize = (value: string | null | undefined) => (value || "").replace(/\s+/g, " ").trim();
-          const isVisible = (item: HTMLElement) => {
-            const rect = item.getBoundingClientRect();
-            if (rect.width < 6 || rect.height < 6) return false;
-            const style = getComputedStyle(item);
-            return style.display !== "none" && style.visibility !== "hidden";
-          };
-          const root = (document.querySelector(".q-body, .question, .q-question, .detail-body") as HTMLElement | null) || document.body;
-          const slotNodes = Array.from(root.querySelectorAll<HTMLElement>("input, textarea, [contenteditable='true'], span, div, i, b, em"))
-            .filter((item) => {
-              if (!isVisible(item)) return false;
-              const cls = (item.className || "").toLowerCase();
-              const text = normalize(item.textContent);
-              const rect = item.getBoundingClientRect();
-              const style = getComputedStyle(item);
-              const inHintPopover = Boolean(item.closest(".ant-popover, [class*='popover'], [class*='tooltip'], .q-help"));
-              if (inHintPopover) return false;
-              const hasSlotClass = /(blank|input|slot|answer|fill)/.test(cls);
-              const boxLike =
-                rect.width >= 16 &&
-                rect.width <= 52 &&
-                rect.height >= 16 &&
-                rect.height <= 56 &&
-                (style.borderStyle !== "none" || style.backgroundColor !== "rgba(0, 0, 0, 0)");
-              const emptyLike = !text || /^[_\u3000\s（）()]+$/.test(text);
-              return hasSlotClass || (boxLike && (emptyLike || text.length <= 4));
-            });
-          const pickSlot = slotNodes.find((item) => {
-            const text = normalize(item.textContent);
-            return !text || /^[_\u3000\s（）()]+$/.test(text);
-          }) || slotNodes[0];
-          if (!pickSlot) return null;
-          const rect = pickSlot.getBoundingClientRect();
-          return {
-            x: rect.left + rect.width / 2,
-            y: rect.top + rect.height / 2,
-          };
-        });
-        if (slot) {
-          await humanClickPoint(page, slot.x, slot.y, delay).catch(() => null);
+        const slotState = await collectBlankSlots();
+        const beforeEmptySlots = slotState.slots.filter((slot) => isBlankSlotEmpty(slot.text));
+        const targetSlot = beforeEmptySlots[0];
+        if (targetSlot) {
+          await humanClickPoint(page, targetSlot.x, targetSlot.y, delay).catch(() => null);
           await humanPause(delay, 100, 220);
         }
 
-        const tokenPoint = await page.evaluate((expected) => {
-          const normalize = (value: string | null | undefined) => (value || "").replace(/\s+/g, " ").trim();
-          const isVisible = (el: HTMLElement) => {
-            const rect = el.getBoundingClientRect();
-            if (rect.width < 6 || rect.height < 6) return false;
-            const style = getComputedStyle(el);
-            return style.display !== "none" && style.visibility !== "hidden";
-          };
-          const root = (document.querySelector(".q-body, .question, .q-question, .detail-body") as HTMLElement | null) || document.body;
-          const slotNodes = Array.from(root.querySelectorAll<HTMLElement>("input, textarea, [contenteditable='true'], span, div, i, b, em"))
-            .filter((item) => {
-              if (!isVisible(item)) return false;
-              const cls = (item.className || "").toLowerCase();
-              const text = normalize(item.textContent);
-              const rect = item.getBoundingClientRect();
-              const style = getComputedStyle(item);
-              const inHintPopover = Boolean(item.closest(".ant-popover, [class*='popover'], [class*='tooltip'], .q-help"));
-              if (inHintPopover) return false;
-              const hasSlotClass = /(blank|input|slot|answer|fill)/.test(cls);
-              const boxLike =
-                rect.width >= 16 &&
-                rect.width <= 52 &&
-                rect.height >= 16 &&
-                rect.height <= 56 &&
-                (style.borderStyle !== "none" || style.backgroundColor !== "rgba(0, 0, 0, 0)");
-              const emptyLike = !text || /^[_\u3000\s（）()]+$/.test(text);
-              return hasSlotClass || (boxLike && (emptyLike || text.length <= 4));
-            });
-          const nodes = Array.from(document.querySelectorAll<HTMLElement>(
-            [
-              ".q-tag-wrap .q-tag",
-              ".q-tag-wrap .tag",
-              ".q-tag-wrap button",
-              ".q-tag-wrap span",
-              ".q-tag-wrap div",
-              "[class*='tag-wrap'] .q-tag",
-              "[class*='tag-wrap'] .tag",
-              ".q-answers .fill-answer",
-              ".fill-answer.fill-answer-click",
-              ".fill-answer",
-              ".q-answers .q-answer.choosable",
-              ".q-answers .q-answer",
-              ".q-answer.choosable",
-            ].join(", ")
-          ));
-          const node = nodes.find((item) => normalize(item.textContent) === expected && isVisible(item));
-          if (!node) return null;
-          node.scrollIntoView({ behavior: "smooth", block: "center" });
-          const clickable = node.closest("button, a, li, [role='button'], .q-tag, .tag, .fill-answer") as HTMLElement | null;
-          const target = (clickable || node) as HTMLElement;
-          const rect = target.getBoundingClientRect();
-          return {
-            x: rect.left + rect.width / 2,
-            y: rect.top + rect.height / 2,
-          };
-        }, token);
-        if (tokenPoint) {
-          await humanClickPoint(page, tokenPoint.x, tokenPoint.y, delay);
-          clickedTokens.push(token);
-          await delay(140, 320);
+        const clickedToken = await triggerBlankToken(token);
+        if (!clickedToken) {
+          continue;
+        }
+
+        const afterTokenState = await collectBlankSlots();
+        const afterEmptySlots = afterTokenState.slots.filter((slot) => isBlankSlotEmpty(slot.text));
+        const newlyFilledSlotIndex = slotState.slots.findIndex((slot, index) => {
+          const beforeText = normalizeBlankSlotText(slot.text);
+          const afterText = normalizeBlankSlotText(afterTokenState.slots[index]?.text || "");
+          return isBlankSlotEmpty(beforeText) && afterText === token;
+        });
+        let slotChanged =
+          afterTokenState.texts.join("|") !== slotState.texts.join("|") ||
+          afterTokenState.emptyCount < slotState.emptyCount ||
+          afterTokenState.nonEmptyCount > slotState.nonEmptyCount;
+        let tokenVisibleInSlots = afterTokenState.texts.some((text) => normalizeBlankSlotText(text) === token);
+        let targetConsumed =
+          afterEmptySlots.length < beforeEmptySlots.length ||
+          newlyFilledSlotIndex >= 0;
+
+        if (!targetConsumed && !tokenVisibleInSlots) {
+          if (targetSlot) {
+            await humanClickPoint(page, targetSlot.x, targetSlot.y, delay).catch(() => null);
+            await humanPause(delay, 100, 220);
+          }
+          const retried = await triggerBlankToken(token);
+          if (retried) {
+            const retryState = await collectBlankSlots();
+            const retryEmptySlots = retryState.slots.filter((slot) => isBlankSlotEmpty(slot.text));
+            slotChanged =
+              retryState.texts.join("|") !== slotState.texts.join("|") ||
+              retryState.emptyCount < slotState.emptyCount ||
+              retryState.nonEmptyCount > slotState.nonEmptyCount;
+            tokenVisibleInSlots = retryState.texts.some((text) => normalizeBlankSlotText(text) === token);
+            targetConsumed =
+              retryEmptySlots.length < beforeEmptySlots.length ||
+              slotState.slots.findIndex((slot, index) => {
+                const beforeText = normalizeBlankSlotText(slot.text);
+                const afterText = normalizeBlankSlotText(retryState.slots[index]?.text || "");
+                return isBlankSlotEmpty(beforeText) && afterText === token;
+              }) >= 0;
+          }
+        }
+
+        if ((slotChanged && targetConsumed) || tokenVisibleInSlots) {
+          appliedTokens.push(token);
         }
       }
     }
 
-    if (clickedTokens.length > 0) {
+    if (appliedTokens.length > 0) {
       const afterState = await collectBlankSlots();
       const changed =
         afterState.texts.join("|") !== beforeState.texts.join("|") ||
@@ -914,7 +1225,7 @@ export async function applyBlankAnswers(
         afterState.nonEmptyCount > beforeState.nonEmptyCount;
       await delay(500, 900);
       if (changed) {
-        return suggestions;
+        return appliedTokens;
       }
     }
   }
@@ -1010,7 +1321,7 @@ export async function applyBlankAnswers(
       if (fromActive) return true;
 
       const stemText = (document.querySelector(".q-body")?.textContent || "").replace(/\s+/g, " ");
-      return stemText.includes(expected);
+      return false;
     }, answer).catch(() => false);
     if (wrote) {
       typed.push(answer);
@@ -1089,20 +1400,11 @@ export async function submitCurrentAnswer(
   previousSnapshot: QuizQuestionSnapshot,
   delay: (min: number, max: number) => Promise<void>
 ): Promise<{ submitted: boolean; advanced: boolean; finished: boolean }> {
-  const movedToNextQuestion = (snapshot: QuizQuestionSnapshot) => {
-    const advancedByIndex =
-      snapshot.currentIndex > 0 &&
-      previousSnapshot.currentIndex > 0 &&
-      snapshot.currentIndex > previousSnapshot.currentIndex;
-    const advancedByStem = Boolean(snapshot.stem && snapshot.stem !== previousSnapshot.stem);
-    return advancedByIndex || advancedByStem;
-  };
-
   const waitForAdvance = async (attempts: number) => {
     for (let i = 0; i < attempts; i++) {
       await delay(700, 1100);
       const snap = await readQuizQuestionSnapshot(page);
-      if (movedToNextQuestion(snap)) {
+      if (hasAdvancedToDifferentQuestion(previousSnapshot, snap)) {
         return true;
       }
     }
@@ -1114,11 +1416,11 @@ export async function submitCurrentAnswer(
     return { submitted: false, advanced: false, finished: false };
   }
 
-  const extraAdvanceAttempts = previousSnapshot.questionType === "blank" ? 14 : 4;
+  const extraAdvanceAttempts = isBlankQuestionType(previousSnapshot.questionType) ? 14 : 4;
 
   await delay(1200, 2000);
   const afterFirst = await readQuizQuestionSnapshot(page);
-  if (movedToNextQuestion(afterFirst)) {
+  if (hasAdvancedToDifferentQuestion(previousSnapshot, afterFirst)) {
     return { submitted: true, advanced: true, finished: false };
   }
 
@@ -1136,7 +1438,7 @@ export async function submitCurrentAnswer(
 
   await delay(1000, 1800);
   const afterAdvance = await readQuizQuestionSnapshot(page);
-  if (movedToNextQuestion(afterAdvance) || await waitForAdvance(previousSnapshot.questionType === "blank" ? 10 : 3)) {
+  if (hasAdvancedToDifferentQuestion(previousSnapshot, afterAdvance) || await waitForAdvance(isBlankQuestionType(previousSnapshot.questionType) ? 10 : 3)) {
     return { submitted: true, advanced: true, finished: false };
   }
 

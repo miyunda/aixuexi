@@ -1,4 +1,5 @@
 import type { Page } from "puppeteer-core";
+import readline from "node:readline";
 import type { IQuizConfig } from "../config";
 import { isLlmConfigured, solveQuizWithLlm } from "../llm";
 import {
@@ -8,6 +9,9 @@ import {
   deriveChoiceSuggestions,
   deriveOrderedBlankSuggestions,
   extractHintHighlights,
+  hasAdvancedToDifferentQuestion,
+  isBlankQuestionType,
+  pickSingleBlankFromHighlights,
   navigateToDailyQuiz,
   openHintAndExtract,
   previewQuestionVideo,
@@ -15,6 +19,55 @@ import {
   submitCurrentAnswer,
 } from "./quiz_helpers";
 import { delay } from "./timing";
+
+function waitForTerminalContinue(): { promise: Promise<"terminal">; cancel: () => void } {
+  let settled = false;
+  const stdin = process.stdin;
+  const stdout = process.stdout;
+  const rl = readline.createInterface({ input: stdin, output: stdout, terminal: Boolean(stdin.isTTY) });
+
+  const cleanup = () => {
+    rl.removeListener("line", onLine);
+    stdin.off("data", onData);
+    rl.close();
+    stdin.pause();
+  };
+
+  const finish = () => {
+    if (settled) return;
+    settled = true;
+    cleanup();
+    resolvePromise("terminal");
+  };
+
+  const onLine = () => {
+    finish();
+  };
+
+  const onData = (chunk: Buffer | string) => {
+    const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
+    if (!/[\r\n]/.test(text)) return;
+    finish();
+  };
+
+  let resolvePromise!: (value: "terminal") => void;
+  const promise = new Promise<"terminal">((resolve) => {
+    resolvePromise = resolve;
+  });
+
+  rl.on("line", onLine);
+  stdin.resume();
+  stdin.on("data", onData);
+
+  return {
+    promise,
+    cancel: () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+    },
+  };
+}
 
 async function injectContinueOverlay(page: Page, token: string, message: string): Promise<void> {
   await page.evaluate(({ currentToken, currentMessage }) => {
@@ -67,24 +120,49 @@ async function removeContinueOverlay(page: Page): Promise<void> {
   }).catch(() => null);
 }
 
+async function getContinuePages(page: Page): Promise<Page[]> {
+  const pages = await page.browser().pages().catch(() => [page]);
+  const xuexiPages = pages.filter((candidate) => /xuexi\.cn/i.test(candidate.url()));
+  return xuexiPages.length > 0 ? xuexiPages : [page];
+}
+
 async function waitForUserContinue(page: Page, message: string): Promise<void> {
   const token = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   console.log(message);
-  await injectContinueOverlay(page, token, message);
+  const terminalWaiter = waitForTerminalContinue();
 
-  while (true) {
-    const clicked = await page.evaluate((expectedToken) => {
-      return (window as typeof window & { __aixuexiContinueToken?: string }).__aixuexiContinueToken === expectedToken;
-    }, token).catch(() => false);
+  const pageWaiter = (async (): Promise<"page"> => {
+    while (true) {
+      const pages = await getContinuePages(page);
+      await Promise.all(pages.map(async (candidate) => {
+        await injectContinueOverlay(candidate, token, message).catch(() => null);
+      }));
 
-    if (clicked) {
-      break;
+      const clickedPages = await Promise.all(pages.map(async (candidate) => {
+        return await candidate.evaluate((expectedToken) => {
+          return (window as typeof window & { __aixuexiContinueToken?: string }).__aixuexiContinueToken === expectedToken;
+        }, token).catch(() => false);
+      }));
+
+      if (clickedPages.some(Boolean)) {
+        return "page";
+      }
+
+      await new Promise<void>((resolve) => setTimeout(resolve, 350));
     }
+  })();
 
-    await new Promise<void>((resolve) => setTimeout(resolve, 350));
+  const continueFrom = await Promise.race([pageWaiter, terminalWaiter.promise]).finally(() => {
+    terminalWaiter.cancel();
+  });
+
+  const pages = await getContinuePages(page);
+  await Promise.all(pages.map(async (candidate) => {
+    await removeContinueOverlay(candidate);
+  }));
+  if (continueFrom === "terminal") {
+    console.log("已收到终端回车，继续执行。");
   }
-
-  await removeContinueOverlay(page);
 }
 
 async function handleLegacyManualQuiz(page: Page, score: number, max: number): Promise<void> {
@@ -95,7 +173,14 @@ async function handleLegacyManualQuiz(page: Page, score: number, max: number): P
 
   console.log(`\x07\n====== 智能提示 ======`);
   console.log(`目前每日答题得分为 ${score}/${max}。`);
-  console.log("请点击进入浏览器页面，手动完成【每日答题】后再告知程序继续。");
+  console.log("程序将自动打开【每日答题】页面，请你手动完成答题并提交。");
+  try {
+    await navigateToDailyQuiz(page, delay);
+  } catch {
+    console.log("[测验任务] 从积分页进入每日答题失败，回退直达每日答题页面。");
+    await page.goto("https://pc.xuexi.cn/points/exam-practice.html", { waitUntil: "networkidle2" });
+    await delay(1200, 2000);
+  }
   await waitForUserContinue(page, "答题完成后，请点击浏览器右下角“继续”按钮，或在终端按 Enter。");
   console.log("收到继续信号，恢复执行自动化任务...");
 }
@@ -119,6 +204,16 @@ function resolveActionableSuggestions(questionType: string, suggestions: string[
     return suggestions.length === 1 ? suggestions : [];
   }
   return suggestions;
+}
+
+function blankSuggestionsLookUsable(suggestions: string[], blankCount: number): boolean {
+  if (suggestions.length === 0) return false;
+  if (suggestions.length === blankCount) return true;
+  if (suggestions.length === 1) {
+    const compact = suggestions[0]?.replace(/\s+/g, "") || "";
+    return compact.length > 0 && compact.length <= Math.max(16, blankCount * 4);
+  }
+  return false;
 }
 
 function isTrueFalseQuestion(options: string[]): boolean {
@@ -157,9 +252,10 @@ async function runSemiAutoQuiz(page: Page, score: number, max: number, quizConfi
   const maxRounds = forceRunWhenFull
     ? Math.max(1, quizConfig?.testRounds ?? 3)
     : Math.max(1, max - score);
+  let completedRounds = 0;
   let stagnantRounds = 0;
 
-  for (let round = 0; round < maxRounds; round++) {
+  while (completedRounds < maxRounds) {
     const snapshot = await readQuizQuestionSnapshot(page);
     if (!snapshot.stem) {
       console.log("[测验任务] 未能识别当前题目，停止自动循环。");
@@ -169,7 +265,7 @@ async function runSemiAutoQuiz(page: Page, score: number, max: number, quizConfi
     const prefix =
       snapshot.currentIndex > 0 && snapshot.totalQuestions > 0
         ? `[测验任务][${snapshot.currentIndex}/${snapshot.totalQuestions}]`
-        : `[测验任务][${round + 1}]`;
+        : `[测验任务][${completedRounds + 1}]`;
 
     console.log(`${prefix} 题干：${snapshot.stem}`);
     if (snapshot.options.length > 0) {
@@ -178,10 +274,17 @@ async function runSemiAutoQuiz(page: Page, score: number, max: number, quizConfi
 
     const hintText = await openHintAndExtract(page, delay);
     let suggestions: string[] = [];
-    if (snapshot.questionType === "blank") {
+    if (isBlankQuestionType(snapshot.questionType)) {
       const blankCount = Math.max(1, snapshot.blankCount || 1);
       const highlighted = await extractHintHighlights(page);
-      if (highlighted.length >= blankCount) {
+      if (snapshot.questionType === "single_blank" && highlighted.length > 0) {
+        const picked = pickSingleBlankFromHighlights(snapshot.stem, hintText, highlighted);
+        if (picked) {
+          suggestions = [picked];
+        } else {
+          suggestions = deriveOrderedBlankSuggestions(snapshot.stem, hintText, blankCount);
+        }
+      } else if (highlighted.length > 0 && highlighted.length === blankCount) {
         suggestions = highlighted.slice(0, blankCount);
       } else {
         suggestions = deriveOrderedBlankSuggestions(snapshot.stem, hintText, blankCount);
@@ -196,7 +299,7 @@ async function runSemiAutoQuiz(page: Page, score: number, max: number, quizConfi
       (
         (snapshot.questionType === "single" && (suggestions.length !== 1 || isTrueFalseQuestion(snapshot.options))) ||
         (snapshot.questionType === "multiple" && suggestions.length === 0) ||
-        (snapshot.questionType === "blank" && suggestions.length !== Math.max(1, snapshot.blankCount || 1))
+        (isBlankQuestionType(snapshot.questionType) && !blankSuggestionsLookUsable(suggestions, Math.max(1, snapshot.blankCount || 1)))
       );
 
     if (shouldUseLlm) {
@@ -229,19 +332,19 @@ async function runSemiAutoQuiz(page: Page, score: number, max: number, quizConfi
 
     const appliedSuggestions = await applySuggestedAnswers(page, snapshot, actionableSuggestions, delay);
     const appliedBlankAnswers =
-      snapshot.questionType === "blank" ? await applyBlankAnswers(page, actionableSuggestions, delay) : [];
+      isBlankQuestionType(snapshot.questionType) ? await applyBlankAnswers(page, actionableSuggestions, delay) : [];
 
     if (appliedSuggestions.length > 0) {
       console.log(`${prefix} 已自动勾选：${appliedSuggestions.join(" | ")}`);
     } else if (appliedBlankAnswers.length > 0) {
       console.log(`${prefix} 已自动填空：${appliedBlankAnswers.join(" | ")}`);
-    } else if (snapshot.questionType !== "blank" && actionableSuggestions.length > 0) {
+    } else if (!isBlankQuestionType(snapshot.questionType) && actionableSuggestions.length > 0) {
       console.log(`${prefix} 找到了建议答案，但未能自动勾选，请人工核对。`);
-    } else if (snapshot.questionType === "blank" && actionableSuggestions.length > 0) {
+    } else if (isBlankQuestionType(snapshot.questionType) && actionableSuggestions.length > 0) {
       console.log(`${prefix} 已提取填空候选，但未能自动写入，请人工核对。`);
     }
 
-    if (quizConfig?.stopAtFirstBlankForDebug && snapshot.questionType === "blank") {
+    if (quizConfig?.stopAtFirstBlankForDebug && isBlankQuestionType(snapshot.questionType)) {
       console.log(`${prefix} 已命中填空题，已执行自动填入步骤；按 stopAtFirstBlankForDebug 暂停等待你验收。`);
       await waitForUserContinue(page, "填空题自动填入已执行。请检查页面是否真的写入，再点击右下角“继续”结束本轮调试。");
       break;
@@ -264,32 +367,33 @@ async function runSemiAutoQuiz(page: Page, score: number, max: number, quizConfi
 
     console.log(`${prefix} 已尝试提交当前题目。`);
     if (submitResult.finished) {
+      completedRounds++;
       console.log("[测验任务] 检测到本轮答题已结束。");
       break;
     }
 
-    if (!submitResult.advanced) {
-      console.log("[测验任务] 提交后暂未识别到下一题，等待页面稳定后继续观察。");
-      await delay(snapshot.questionType === "blank" ? 3200 : 1400, snapshot.questionType === "blank" ? 4800 : 2200);
-      const retrySnapshot = await readQuizQuestionSnapshot(page);
-      const advancedAfterWait =
-        (retrySnapshot.currentIndex > 0 && snapshot.currentIndex > 0 && retrySnapshot.currentIndex > snapshot.currentIndex) ||
-        Boolean(retrySnapshot.stem && retrySnapshot.stem !== snapshot.stem);
-      if (advancedAfterWait) {
-        stagnantRounds = 0;
-        console.log("[测验任务] 追加等待后已进入下一题，继续执行。");
-        continue;
-      }
-      stagnantRounds++;
-      if (stagnantRounds >= 2) {
-        console.log("[测验任务] 连续两次未能识别到下一题，本轮暂停。");
-        break;
-      }
-      console.log("[测验任务] 追加等待后仍未识别到下一题，将重读当前页面后继续尝试。");
+    if (submitResult.advanced) {
+      completedRounds++;
+      stagnantRounds = 0;
       continue;
     }
 
-    stagnantRounds = 0;
+    console.log("[测验任务] 提交后暂未识别到下一题，等待页面稳定后继续观察。");
+    await delay(isBlankQuestionType(snapshot.questionType) ? 3200 : 1400, isBlankQuestionType(snapshot.questionType) ? 4800 : 2200);
+    const retrySnapshot = await readQuizQuestionSnapshot(page);
+    const advancedAfterWait = hasAdvancedToDifferentQuestion(snapshot, retrySnapshot);
+    if (advancedAfterWait) {
+      completedRounds++;
+      stagnantRounds = 0;
+      console.log("[测验任务] 追加等待后已进入下一题，继续执行。");
+      continue;
+    }
+    stagnantRounds++;
+    if (stagnantRounds >= 2) {
+      console.log("[测验任务] 连续两次未能识别到下一题，本轮暂停。");
+      break;
+    }
+    console.log("[测验任务] 追加等待后仍未识别到下一题，将重读当前页面后继续尝试。");
   }
 
   console.log("半自动答题本轮执行完毕。");
