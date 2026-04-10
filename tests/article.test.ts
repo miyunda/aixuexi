@@ -32,6 +32,10 @@ describe("looksLikeArticleTitle", () => {
     expect(looksLikeArticleTitle("iv style=\"position: relative; min-height: 0px;\"")).toBe(false);
   });
 
+  test("rejects css snippet text captured from style containers", () => {
+    expect(looksLikeArticleTitle(".word-item:hover { color: #d30000 !important; } #Cdcw8v5jwzdc00{ overflow: hidden; }")).toBe(false);
+  });
+
   test("accepts normal article titles", () => {
     expect(looksLikeArticleTitle("深入学习贯彻党的二十大精神")).toBe(true);
   });

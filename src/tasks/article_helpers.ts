@@ -147,6 +147,8 @@ export function looksLikeArticleTitle(text: string): boolean {
   const compact = normalized.replace(/\s+/g, "");
   if (normalized.length < 6 || normalized.length > 60) return false;
   if (/<|>|{|}|function|\bvar\b|const|class=|style=|div /.test(normalized)) return false;
+  if (/!important|overflow:|display:|position:|padding:|margin:|font-|line-height:|color:|background:/.test(normalized)) return false;
+  if (/[.#][\w-]+(?::[\w-]+)?\s*\{/.test(normalized)) return false;
   if (ARTICLE_TEXT_BLACKLIST.some((keyword) => compact.includes(keyword.replace(/\s+/g, "")))) return false;
   if (!/[\u4e00-\u9fa5A-Za-z]/.test(compact)) return false;
   if (/退出|登录|欢迎您|搜索结果|积分明细/.test(compact)) return false;
@@ -384,11 +386,17 @@ export async function openArticleFromSectionPage(
 
 export async function validateArticlePage(page: Page, expectedTitle: string): Promise<ArticleSiteCheckResult> {
   return await page.evaluate((articleTextBlacklist, rawExpectedTitle) => {
+    const sanitizeTitle = (text: string | null | undefined) => (text || "")
+      .replace(/\s+/g, " ")
+      .replace(/\s*[|｜-]\s*学习强国.*$/, "")
+      .trim();
     const looksLikeTitle = (text: string) => {
-      const normalized = text.replace(/\s+/g, " ").trim();
+      const normalized = sanitizeTitle(text);
       const compact = normalized.replace(/\s+/g, "");
       if (normalized.length < 6 || normalized.length > 60) return false;
       if (/<|>|{|}|function|\bvar\b|const|class=|style=|div /.test(normalized)) return false;
+      if (/!important|overflow:|display:|position:|padding:|margin:|font-|line-height:|color:|background:/.test(normalized)) return false;
+      if (/[.#][\w-]+(?::[\w-]+)?\s*\{/.test(normalized)) return false;
       if (articleTextBlacklist.some((keyword) => compact.includes(keyword.replace(/\s+/g, "")))) return false;
       if (!/[\u4e00-\u9fa5A-Za-z]/.test(compact)) return false;
       if (/退出|登录|欢迎您|搜索结果|积分明细/.test(compact)) return false;
@@ -447,11 +455,26 @@ export async function validateArticlePage(page: Page, expectedTitle: string): Pr
       const rect = node.getBoundingClientRect();
       return rect.width >= 320 && rect.height >= 180;
     });
-    const expectedNormalized = (rawExpectedTitle || "").replace(/^•+/, "").replace(/\s+/g, " ").trim();
+    const expectedNormalized = sanitizeTitle((rawExpectedTitle || "").replace(/^•+/, "").replace(/\s+/g, " ").trim());
     const headingCandidates = Array.from(document.querySelectorAll("h1, h2, .title, [class*='title'], [class*='header'], [class*='headline']"))
-      .map((el) => (el.textContent || "").replace(/\s+/g, " ").trim())
+      .map((el) => sanitizeTitle(el.textContent || ""))
       .filter(Boolean);
-    const heading = headingCandidates.find((text) => looksLikeTitle(text)) || headingCandidates[0] || expectedNormalized;
+    const titleFromDocumentTitle = sanitizeTitle(document.title);
+    const bodyLines = (document.body.innerText || "")
+      .split("\n")
+      .map((line) => sanitizeTitle(line))
+      .filter(Boolean);
+    const bodyHeadingCandidate = bodyLines.find((line, index) => {
+      if (index > 18) return false;
+      if (/^\d{4}-\d{1,2}-\d{1,2}$/.test(line) || /^来源[:：]?$/.test(line) || /^打印$/.test(line)) return false;
+      return looksLikeTitle(line);
+    }) || "";
+    const heading = [
+      headingCandidates.find((text) => looksLikeTitle(text)) || "",
+      looksLikeTitle(titleFromDocumentTitle) ? titleFromDocumentTitle : "",
+      bodyHeadingCandidate,
+      looksLikeTitle(expectedNormalized) ? expectedNormalized : "",
+    ].find(Boolean) || "";
     const articleMeta = (document.body.innerText || "").slice(0, 1600);
     const hasPublishMeta = /\d{4}-\d{1,2}-\d{1,2}|\d{4}年\d{1,2}月\d{1,2}日|来源|责任编辑/.test(articleMeta);
     const dateLikeCount = (document.body.innerText.match(/\d{4}-\d{2}-\d{2}/g) || []).length;
