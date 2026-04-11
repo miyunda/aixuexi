@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { extractArticleTitle, isCandidateArticleUrl, isSeriesDirectoryShape, isVideoDominatedArticleShape, looksLikeArticleSeriesSectionTitle, looksLikeArticleTitle, normalizeArticleSeriesTitle, normalizeArticleUrl } from "../src/tasks/article_helpers";
+import { extractArticleTitle, isCandidateArticleUrl, isLikelyArticleListShape, isSeriesDirectoryShape, isVideoDominatedArticleShape, looksLikeArticleSeriesSectionTitle, looksLikeArticleTitle, normalizeArticleSeriesTitle, normalizeArticleUrl } from "../src/tasks/article_helpers";
 
 describe("isCandidateArticleUrl", () => {
   test("accepts real article-style urls", () => {
@@ -155,5 +155,29 @@ describe("isSeriesDirectoryShape", () => {
       dateLikeCount: 2,
       listItemCount: 6,
     })).toBe(true);
+  });
+});
+
+describe("isLikelyArticleListShape", () => {
+  test("rejects dense dated link lists without meaningful body paragraphs", () => {
+    expect(isLikelyArticleListShape({
+      textLinkItemTitleCount: 16,
+      dateLikeCount: 16,
+      anchorCount: 57,
+      meaningfulParagraphCount: 0,
+      maxContentLength: 0,
+      hasBylineMeta: false,
+    })).toBe(true);
+  });
+
+  test("keeps real article pages with meaningful body content", () => {
+    expect(isLikelyArticleListShape({
+      textLinkItemTitleCount: 0,
+      dateLikeCount: 1,
+      anchorCount: 5,
+      meaningfulParagraphCount: 6,
+      maxContentLength: 884,
+      hasBylineMeta: true,
+    })).toBe(false);
   });
 });

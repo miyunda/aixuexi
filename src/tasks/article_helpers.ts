@@ -55,6 +55,24 @@ export function isVideoDominatedArticleShape(input: {
   );
 }
 
+export function isLikelyArticleListShape(input: {
+  textLinkItemTitleCount: number;
+  dateLikeCount: number;
+  anchorCount: number;
+  meaningfulParagraphCount: number;
+  maxContentLength: number;
+  hasBylineMeta: boolean;
+}): boolean {
+  return (
+    input.textLinkItemTitleCount >= 8 &&
+    input.dateLikeCount >= 6 &&
+    input.anchorCount >= 20 &&
+    input.meaningfulParagraphCount < 2 &&
+    input.maxContentLength < 900 &&
+    !input.hasBylineMeta
+  );
+}
+
 export function normalizeArticleSeriesTitle(rawText: string): string {
   return rawText
     .replace(/^VW\d+\.\d+\s*/i, "")
@@ -390,6 +408,22 @@ export async function validateArticlePage(page: Page, expectedTitle: string): Pr
       .replace(/\s+/g, " ")
       .replace(/\s*[|｜-]\s*学习强国.*$/, "")
       .trim();
+    const isCssLikeText = (text: string) => /[{}]/.test(text) && /!important|overflow:|display:|position:|padding:|margin:|font-|line-height:|color:|background:/.test(text);
+    const isLikelyListPage = (input: {
+      textLinkItemTitleCount: number;
+      dateLikeCount: number;
+      anchorCount: number;
+      meaningfulParagraphCount: number;
+      maxContentLength: number;
+      hasBylineMeta: boolean;
+    }) => (
+      input.textLinkItemTitleCount >= 8 &&
+      input.dateLikeCount >= 6 &&
+      input.anchorCount >= 20 &&
+      input.meaningfulParagraphCount < 2 &&
+      input.maxContentLength < 900 &&
+      !input.hasBylineMeta
+    );
     const looksLikeTitle = (text: string) => {
       const normalized = sanitizeTitle(text);
       const compact = normalized.replace(/\s+/g, "");
@@ -444,11 +478,21 @@ export async function validateArticlePage(page: Page, expectedTitle: string): Pr
 
     const selectors = ["article", "main", ".rich-text", ".render-detail-article", ".detail-content", ".text-content", "[class*='article']", "[class*='detail']", "[class*='content']", "[id*='article']", "[id*='content']"];
     const contentLengths = selectors
-      .map((sel) => document.querySelector(sel))
-      .filter((el): el is Element => !!el)
-      .map((el) => (el.textContent || "").replace(/\s+/g, " ").trim().length);
+      .flatMap((sel) => Array.from(document.querySelectorAll(sel)))
+      .map((el) => (el.textContent || "").replace(/\s+/g, " ").trim())
+      .filter((text) => text.length > 0 && !isCssLikeText(text))
+      .map((text) => text.length);
     const maxContentLength = contentLengths.length > 0 ? Math.max(...contentLengths) : 0;
-    const longP = Array.from(document.querySelectorAll("p")).filter((p) => (p.textContent || "").replace(/\s+/g, " ").trim().length > 50);
+    const longP = Array.from(document.querySelectorAll("p")).filter((p) => {
+      const text = (p.textContent || "").replace(/\s+/g, " ").trim();
+      if (text.length <= 50) return false;
+      const pathText = `${p.className || ""} ${p.parentElement?.className || ""} ${p.parentElement?.id || ""} ${p.closest("footer, nav, header, aside")?.className || ""}`.toLowerCase();
+      if (/copyright|footer|bottom|aside|sidebar|nav|header|menu|tool|recommend|related/.test(pathText)) return false;
+      if (articleTextBlacklist.some((keyword) => text.includes(keyword))) return false;
+      if (/版权所有|许可证|举报电话|ICP备案|京公网安备|Copyright/i.test(text)) return false;
+      if (p.querySelectorAll("a").length >= 2) return false;
+      return /[，。；：？！]/.test(text);
+    });
     const bodyTextLength = (document.body.innerText || "").replace(/\s+/g, " ").trim().length;
     const mediaCount = document.querySelectorAll("video, audio, iframe").length;
     const hasLargeVideoPlayer = Array.from(document.querySelectorAll<HTMLElement>("video, iframe, .prism-player, [class*='player'], [class*='video']")).some((node) => {
@@ -476,7 +520,9 @@ export async function validateArticlePage(page: Page, expectedTitle: string): Pr
       looksLikeTitle(expectedNormalized) ? expectedNormalized : "",
     ].find(Boolean) || "";
     const articleMeta = (document.body.innerText || "").slice(0, 1600);
-    const hasPublishMeta = /\d{4}-\d{1,2}-\d{1,2}|\d{4}年\d{1,2}月\d{1,2}日|来源|责任编辑/.test(articleMeta);
+    const hasDateMeta = /\d{4}-\d{1,2}-\d{1,2}|\d{4}年\d{1,2}月\d{1,2}日/.test(articleMeta);
+    const hasBylineMeta = /来源|责任编辑|作者|播报员/.test(articleMeta);
+    const hasPublishMeta = hasDateMeta || hasBylineMeta;
     const dateLikeCount = (document.body.innerText.match(/\d{4}-\d{2}-\d{2}/g) || []).length;
     const anchorCount = document.querySelectorAll("a").length;
     const listItemCount = document.querySelectorAll("li, .item, .text-link-item, .grid-cell, [class*='item']").length;
@@ -545,6 +591,16 @@ export async function validateArticlePage(page: Page, expectedTitle: string): Pr
       if (!titleMatches && longP.length < 2 && maxContentLength < 900) {
         return { ok: false, reason: "页面标题与候选标题不匹配" } as const;
       }
+    }
+    if (isLikelyListPage({
+      textLinkItemTitleCount,
+      dateLikeCount,
+      anchorCount,
+      meaningfulParagraphCount: longP.length,
+      maxContentLength,
+      hasBylineMeta,
+    })) {
+      return { ok: false, reason: "页面更像文章列表页" } as const;
     }
     if ((searchInput || hasSearchResultsHeading) && maxContentLength < 600 && longP.length < 2) {
       return { ok: false, reason: "页面更像搜索结果页" } as const;
