@@ -60,6 +60,38 @@ async function recoverToChannelPage(page: Page, articlePage: Page, channelUrl: s
   }
 }
 
+async function tryOpenNestedArticle(
+  page: Page,
+  itemTitle: string,
+  seenTitles: Set<string>,
+  invalidTitles: Set<string>,
+): Promise<{ readingPage: Page; nestedTitle: string | null; count: number } | null> {
+  const nestedExtraction = await collectArticleCandidates(
+    page,
+    new Set([...seenTitles, ...invalidTitles, itemTitle]),
+  );
+  const nestedCandidates = nestedExtraction.results;
+
+  if (nestedCandidates.length > 0) {
+    console.log(`[文章任务] => 已进入文章入口页，找到 ${nestedExtraction.count} 篇候选正文。`);
+    const nestedItem = nestedCandidates.slice(0, 6).sort(() => 0.5 - Math.random())[0] ?? nestedCandidates[0];
+    if (nestedItem) {
+      console.log(`[文章任务] => 入口页内选中文章：${nestedItem.text}`);
+      const nestedPage = await openArticleFromCandidate(page, nestedItem, delay);
+      if (nestedPage) {
+        return { readingPage: nestedPage, nestedTitle: nestedItem.text, count: nestedExtraction.count };
+      }
+    }
+  }
+
+  const nestedPage = await openArticleFromSectionPage(page, itemTitle, delay);
+  if (nestedPage) {
+    return { readingPage: nestedPage, nestedTitle: null, count: nestedExtraction.count };
+  }
+
+  return null;
+}
+
 async function processCandidate(
   page: Page,
   channelUrl: string | null,
@@ -82,31 +114,13 @@ async function processCandidate(
 
   let readingPage = articlePage;
   let siteCheck;
+  let expectedReadingTitle = item.text;
 
   if (item.kind === "section") {
-    const nestedExtraction = await collectArticleCandidates(
-      articlePage,
-      new Set([...seenTitles, ...invalidTitles, item.text]),
-    );
-    const nestedCandidates = nestedExtraction.results;
-
-    if (nestedCandidates.length > 0) {
-      console.log(`[文章任务] => 已进入子频道列表，找到 ${nestedExtraction.count} 篇候选正文。`);
-      const nestedItem = nestedCandidates.slice(0, 6).sort(() => 0.5 - Math.random())[0] ?? nestedCandidates[0];
-      if (nestedItem) {
-        console.log(`[文章任务] => 子频道内选中文章：${nestedItem.text}`);
-        const nestedPage = await openArticleFromCandidate(articlePage, nestedItem, delay);
-        if (nestedPage) {
-          readingPage = nestedPage;
-        }
-      }
-    }
-
-    if (readingPage === articlePage) {
-      const nestedPage = await openArticleFromSectionPage(articlePage, item.text, delay);
-      if (nestedPage) {
-        readingPage = nestedPage;
-      }
+    const nestedAttempt = await tryOpenNestedArticle(articlePage, item.text, seenTitles, invalidTitles);
+    if (nestedAttempt) {
+      readingPage = nestedAttempt.readingPage;
+      expectedReadingTitle = nestedAttempt.nestedTitle || item.text;
     }
 
     if (readingPage === articlePage) {
@@ -116,14 +130,15 @@ async function processCandidate(
       return false;
     }
 
-    siteCheck = await validateArticlePage(readingPage, item.text);
+    siteCheck = await validateArticlePage(readingPage, expectedReadingTitle);
   } else {
-    siteCheck = await validateArticlePage(readingPage, item.text);
-    if (!siteCheck.ok && /列表页|目录页|聚合/.test(siteCheck.reason)) {
-      const nestedPage = await openArticleFromSectionPage(readingPage, item.text, delay);
-      if (nestedPage) {
-        readingPage = nestedPage;
-        siteCheck = await validateArticlePage(readingPage, item.text);
+    siteCheck = await validateArticlePage(readingPage, expectedReadingTitle);
+    if (!siteCheck.ok && /列表页|目录页|聚合|标题不匹配/.test(siteCheck.reason)) {
+      const nestedAttempt = await tryOpenNestedArticle(readingPage, item.text, seenTitles, invalidTitles);
+      if (nestedAttempt) {
+        readingPage = nestedAttempt.readingPage;
+        expectedReadingTitle = nestedAttempt.nestedTitle || item.text;
+        siteCheck = await validateArticlePage(readingPage, expectedReadingTitle);
       }
     }
   }
