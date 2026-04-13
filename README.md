@@ -2,6 +2,8 @@
 ![License](https://img.shields.io/badge/License-WTFPL-brightgreen)
 ![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux-blue)
 
+# English reader please ignore this project, you do not need this.
+
 # 爱学习
 
 本项目是一个本地 CLI 工具，用 Chrome 浏览器辅助完成学习强国 PC 端的日常任务。
