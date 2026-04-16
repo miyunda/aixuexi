@@ -29,4 +29,12 @@ describe("HistoryManager", () => {
     expect(mgr.hasUrl("https://article.xuexi.cn/articles/index.html?art_id=123&item_id=456")).toBe(true);
     expect(mgr.hasUrl("https://article.xuexi.cn/articles/index.html?art_id=123&item_id=999")).toBe(false);
   });
+
+  test("should add and check article titles with whitespace normalization", () => {
+    if (fs.existsSync(testFile)) fs.unlinkSync(testFile);
+    const mgr = new HistoryManager(testFile);
+    mgr.addArticleTitle("《求是》杂志发表习近平总书记重要文章");
+    expect(mgr.hasArticleTitle("《求是》 杂志发表习近平总书记重要文章")).toBe(true);
+    expect(mgr.hasArticleTitle("推动全民阅读，建设书香社会")).toBe(false);
+  });
 });

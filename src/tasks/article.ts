@@ -48,6 +48,11 @@ async function collectCurrentCandidates(page: Page, completed: number, seenTitle
   return extraction.results;
 }
 
+function hasSeenArticleTitle(history: HistoryManager, seenTitles: Set<string>, invalidTitles: Set<string>, title: string | null | undefined): boolean {
+  if (!title) return false;
+  return seenTitles.has(title) || invalidTitles.has(title) || history.hasArticleTitle(title);
+}
+
 async function recoverToChannelPage(page: Page, articlePage: Page, channelUrl: string | null) {
   if (articlePage !== page) {
     await articlePage.close().catch(() => null);
@@ -103,9 +108,16 @@ async function processCandidate(
   invalidTitles: Set<string>,
 ): Promise<boolean> {
   console.log(`[文章任务] (${completed + 1}/${targetCount}) 选中${item.kind === "section" ? "列表" : "文章"}：${item.text || "(无标题)"}`);
+
+  if (history.hasArticleTitle(item.text)) {
+    console.log(`[文章任务] => 候选已读，跳过：${item.text}`);
+    invalidTitles.add(item.text);
+    return false;
+  }
+
   const articlePage = await openArticleFromCandidate(page, item, delay);
   if (!articlePage) {
-    console.log("[文章任务] => 点击卡片后未能打开详情页，放弃。");
+    console.log(`[文章任务] => 打开失败，跳过：${item.text}`);
     invalidTitles.add(item.text);
     return false;
   }
@@ -124,7 +136,7 @@ async function processCandidate(
     }
 
     if (readingPage === articlePage) {
-      console.log("[文章任务] => 已进入子频道列表，但未找到可阅读的正文链接，放弃。");
+      console.log(`[文章任务] => 入口列表无可读正文，跳过：${item.text}`);
       invalidTitles.add(item.text);
       await recoverToChannelPage(page, articlePage, channelUrl);
       return false;
@@ -144,13 +156,26 @@ async function processCandidate(
   }
 
   if (!siteCheck.ok) {
-    console.log(`[文章任务] => 判定为无效页面 (${siteCheck.reason})，放弃。`);
+    console.log(`[文章任务] => 无效页面，跳过：${item.text} (${siteCheck.reason})`);
     invalidTitles.add(item.text);
     await recoverToChannelPage(page, articlePage, channelUrl);
     return false;
   }
 
-  console.log(`[文章任务] 确认进入正文，标题：${siteCheck.heading || item.text}`);
+  const actualTitle = siteCheck.heading || item.text;
+  if (
+    history.hasUrl(readingPage.url()) ||
+    hasSeenArticleTitle(history, seenTitles, invalidTitles, actualTitle) ||
+    hasSeenArticleTitle(history, seenTitles, invalidTitles, item.text)
+  ) {
+    console.log(`[文章任务] => 正文已读，跳过：${actualTitle}`);
+    invalidTitles.add(item.text);
+    invalidTitles.add(actualTitle);
+    await recoverToChannelPage(page, articlePage, channelUrl);
+    return false;
+  }
+
+  console.log(`[文章任务] 确认进入正文，标题：${actualTitle}`);
   console.log("[文章任务] 调整阅读视口...");
   await performArticleReadScroll(readingPage, delay);
 
@@ -159,10 +184,10 @@ async function processCandidate(
   await delay(waitTime, waitTime);
 
   history.addUrl(readingPage.url());
-  seenTitles.add(siteCheck.heading || item.text);
-  if (item.kind === "section") {
-    seenTitles.add(item.text);
-  }
+  history.addArticleTitle(actualTitle);
+  history.addArticleTitle(item.text);
+  seenTitles.add(actualTitle);
+  seenTitles.add(item.text);
 
   if (readingPage !== page) {
     await readingPage.close().catch(() => null);

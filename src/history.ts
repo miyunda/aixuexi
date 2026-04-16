@@ -1,7 +1,11 @@
 import * as fs from "fs";
 import * as path from "path";
 
-export interface IHistoryRecord { url: string; timestamp: number; }
+export interface IHistoryRecord {
+  url?: string;
+  titleKey?: string;
+  timestamp: number;
+}
 const RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
 function normalizeUrl(rawUrl: string): string {
@@ -20,6 +24,10 @@ function normalizeUrl(rawUrl: string): string {
   } catch {
     return rawUrl.trim();
   }
+}
+
+function normalizeTitleKey(rawTitle: string): string {
+  return rawTitle.replace(/\s+/g, "").trim();
 }
 
 export class HistoryManager {
@@ -42,8 +50,12 @@ export class HistoryManager {
   private pruneExpired() {
     const cutoff = Date.now() - RETENTION_MS;
     this.records = this.records
-      .map(record => ({ ...record, url: normalizeUrl(record.url) }))
-      .filter(record => record.url && record.timestamp >= cutoff);
+      .map(record => ({
+        ...record,
+        url: record.url ? normalizeUrl(record.url) : undefined,
+        titleKey: record.titleKey ? normalizeTitleKey(record.titleKey) : undefined,
+      }))
+      .filter(record => (record.url || record.titleKey) && record.timestamp >= cutoff);
   }
 
   public save() {
@@ -63,5 +75,20 @@ export class HistoryManager {
     this.pruneExpired();
     const normalizedUrl = normalizeUrl(url);
     return this.records.some(r => r.url === normalizedUrl);
+  }
+
+  public addArticleTitle(title: string) {
+    const normalizedTitle = normalizeTitleKey(title);
+    if (!normalizedTitle || this.hasArticleTitle(normalizedTitle)) return;
+
+    this.records.push({ titleKey: normalizedTitle, timestamp: Date.now() });
+    this.save();
+  }
+
+  public hasArticleTitle(title: string): boolean {
+    this.pruneExpired();
+    const normalizedTitle = normalizeTitleKey(title);
+    if (!normalizedTitle) return false;
+    return this.records.some((record) => record.titleKey === normalizedTitle);
   }
 }
